@@ -985,40 +985,179 @@ function Get-DellWindowsNetworkDrivers {
             InfName=[string](Get-ObjectValue $driver 'InfName')
             Assinado=(Get-ObjectValue $driver 'IsSigned')
         }
-        # Só guarda os perfis Dell atualmente implementados, sem inventariar o SO.
-        if (Get-BroadcomPciProfile $registro) { $registro }
+        # Coleta interfaces PCI, independentemente do modelo/provedor. Só um pacote
+        # Dell validado poderá transformar esses dados em pendência no relatório.
+        $registro
     }
 }
 
-function Get-BroadcomInstalledDriver {
-    param([object[]]$Inventario, [object[]]$DriversWindows)
-    $falha = [pscustomobject]@{ Valido=$false; Versao=''; InfName=''; Quantidade=0; Motivo='DSU não fornece uma versão de driver utilizável; faltam dados CIM completos, assinados e com provedor Broadcom para todas as interfaces inventariadas.' }
-    $interfaces = @($Inventario | Where-Object { $_.Tipo -eq 'FRMW' -and (Get-ObjectValue $_ 'VendorID') -eq '14E4' -and (Get-ObjectValue $_ 'DeviceID') -eq '165F' })
-    if ($interfaces.Count -eq 0) { return $falha }
-    if (@($interfaces | Where-Object { -not (Get-BroadcomPciProfile $_) }).Count) {
-        $falha.Motivo = 'Há uma interface Broadcom sem perfil PCI validado; não é seguro atribuir uma versão à família inteira.'
-        return $falha
+function Get-PciDeviceKey {
+    param($Dispositivo)
+    $ids = @('VendorID','DeviceID','SubVendorID','SubDeviceID') | ForEach-Object { ([string](Get-ObjectValue $Dispositivo $_)).ToUpperInvariant() }
+    if (@($ids | Where-Object { $_ -notmatch '^[0-9A-F]{4}$' }).Count -or $ids[0] -in @('0000','FFFF') -or $ids[2] -in @('0000','FFFF')) { return '' }
+    return ($ids -join ':')
+}
+
+function Get-DellDriverDefinitions {
+    # DADOS DE REFERÊNCIA: mantidos separados da engine. Não há modelo de servidor,
+    # Service Tag, provedor instalado ou número fixo de interfaces nestes critérios.
+    $dados = @'
+[
+    {
+        "Id":  "Dell-49X84-NDIS",
+        "ComponentIDs":  [
+                             "8641"
+                         ],
+        "NomeInventario":  "Broadcom NetXtreme Driver Family",
+        "Classe":  "NET",
+        "FamiliasPCI":  [
+                            "14E4:1657",
+                            "14E4:165F"
+                        ],
+        "PerfisPCI":  [
+                          "14E4:165F:14E4:2003",
+                          "14E4:1657:14E4:1904",
+                          "14E4:165F:1028:1F5B",
+                          "14E4:1657:14E4:1905",
+                          "14E4:165F:1028:04F6",
+                          "14E4:165F:1028:04F7",
+                          "14E4:165F:1028:04F8",
+                          "14E4:165F:1028:04F9",
+                          "14E4:165F:1028:04FA",
+                          "14E4:165F:1028:04DC",
+                          "14E4:165F:1028:05E5",
+                          "14E4:165F:1028:1F54",
+                          "14E4:165F:1028:0639",
+                          "14E4:165F:1028:063B",
+                          "14E4:165F:1028:06A5",
+                          "14E4:165F:1028:06A6",
+                          "14E4:165F:1028:06A7",
+                          "14E4:165F:1028:001F",
+                          "14E4:165F:1028:000A",
+                          "14E4:165F:14E4:4120",
+                          "14E4:165F:14E4:4160",
+                          "14E4:165F:1028:07F7",
+                          "14E4:165F:1028:088E",
+                          "14E4:165F:1028:0890",
+                          "14E4:165F:1028:088F",
+                          "14E4:165F:1028:0891",
+                          "14E4:165F:1028:1FEC",
+                          "14E4:165F:14E4:2018",
+                          "14E4:165F:1028:08FD",
+                          "14E4:165F:1028:0900",
+                          "14E4:165F:1028:08FF",
+                          "14E4:165F:1028:0917",
+                          "14E4:165F:1028:0A17"
+                      ],
+        "DriverId":  "49X84",
+        "VersaoFamilia":  "21.80.3",
+        "VersaoDriver":  "214.0.0.6",
+        "EspacoVersao":  "NDIS",
+        "Sistemas":  [
+                         "WST14",
+                         "WS19L"
+                     ],
+        "Arquivo":  "Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+        "TipoArquivo":  "LW64",
+        "Fonte":  "https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt"
     }
-    $perfis = @($interfaces | ForEach-Object { Get-BroadcomPciProfile $_ } | Select-Object -Unique)
-    $evidencias = @()
-    foreach ($perfil in $perfis) {
-        $esperadas = @($interfaces | Where-Object { (Get-BroadcomPciProfile $_) -eq $perfil }).Count
-        $encontradas = @($DriversWindows | Where-Object { (Get-BroadcomPciProfile $_) -eq $perfil })
-        if ($encontradas.Count -ne $esperadas) { return $falha }
-        $evidencias += $encontradas
+]
+'@
+    foreach ($definicao in (ConvertFrom-Json -InputObject $dados)) { $definicao }
+}
+
+function Get-DellDriverReference {
+    param([object[]]$Definicoes, [object[]]$Downloads, [string]$SO)
+    $falha = [pscustomobject]@{Valido=$false; Motivo='Não há pacote Dell com identidade, arquivo, versão de driver e Windows validados nos metadados disponíveis.'}
+    $candidatos = @(
+        foreach ($def in $Definicoes) {
+            if ($def.Classe -ne 'NET' -or $null -eq (Compare-DottedVersion $def.VersaoDriver $def.VersaoDriver)) { continue }
+            if ($SO -notin $def.Sistemas) { continue }
+            foreach ($pacote in @($Downloads | Where-Object { $_.Type -eq 'DRVR' -and $_.DriverId -eq $def.DriverId })) {
+                if (([string]$pacote.DellVer -split ',')[0].Trim() -cne $def.VersaoFamilia) { continue }
+                $arquivo = Get-SiteWindowsPackage $pacote
+                if ($null -eq $arquivo -or (Get-ObjectValue $arquivo 'FileName') -ine $def.Arquivo -or (Get-ObjectValue $arquivo 'FileType') -ine $def.TipoArquivo) { continue }
+                $data = Get-SiteReleaseDate $pacote
+                if ($data -eq [datetime]::MinValue) { continue }
+                [pscustomobject]@{Valido=$true; Definicao=$def; Pacote=$pacote; Arquivo=$arquivo; Data=$data}
+            }
+        }
+    )
+    if ($candidatos.Count -eq 0) { return $falha }
+    $ultima = ($candidatos | Sort-Object Data -Descending | Select-Object -First 1).Data
+    $recentes = @($candidatos | Where-Object Data -eq $ultima)
+    $chaves = @($recentes | ForEach-Object { $_.Definicao | ConvertTo-Json -Depth 8 -Compress } | Select-Object -Unique)
+    if ($chaves.Count -ne 1) { $falha.Motivo='Mais de uma referência de driver na mesma data; associação ambígua.'; return $falha }
+    return $recentes[0]
+}
+
+function Get-DellInstalledDriverGroups {
+    param([object[]]$Inventario, [object[]]$DriversWindows, $Definicao)
+    $falha = [pscustomobject]@{Valido=$false; Grupos=@(); Motivo='Faltam dados CIM completos para os dispositivos atendidos pelo pacote Dell.'}
+    $interfaces = @($Inventario | Where-Object { $_.Tipo -eq 'FRMW' -and (('{0}:{1}' -f (Get-ObjectValue $_ 'VendorID'),(Get-ObjectValue $_ 'DeviceID')).ToUpperInvariant()) -in $Definicao.FamiliasPCI })
+    $evidencias = @($DriversWindows | Where-Object { (('{0}:{1}' -f (Get-ObjectValue $_ 'VendorID'),(Get-ObjectValue $_ 'DeviceID')).ToUpperInvariant()) -in $Definicao.FamiliasPCI })
+    if ($evidencias.Count -eq 0) { return $falha }
+    foreach ($item in @($interfaces) + @($evidencias)) {
+        if ((Get-PciDeviceKey $item) -notin $Definicao.PerfisPCI) { $falha.Motivo='Um perfil PCI desta família não está confirmado nos metadados do pacote Dell.'; return $falha }
+    }
+    # Quando o XML traz as interfaces, exige cobertura completa por perfil. Sem
+    # firmware inventariado, a identidade CIM local pode comprovar o hardware.
+    if ($interfaces.Count) {
+        $perfis = @($interfaces | ForEach-Object { Get-PciDeviceKey $_ } | Select-Object -Unique)
+        if ($interfaces.Count -ne $evidencias.Count) { return $falha }
+        foreach ($perfil in $perfis) {
+            if (@($interfaces | Where-Object { (Get-PciDeviceKey $_) -eq $perfil }).Count -ne @($evidencias | Where-Object { (Get-PciDeviceKey $_) -eq $perfil }).Count) { return $falha }
+        }
     }
     $ids = @($evidencias | ForEach-Object { [string](Get-ObjectValue $_ 'PnpDeviceID') } | Select-Object -Unique)
-    if ($ids.Count -ne $interfaces.Count -or $ids -contains '') { return $falha }
+    if ($ids.Count -ne $evidencias.Count) { $falha.Motivo='Identidades CIM duplicadas; não é possível atribuir as instâncias com segurança.'; return $falha }
     foreach ($item in $evidencias) {
-        if ((Get-ObjectValue $item 'Assinado') -isnot [bool] -or (Get-ObjectValue $item 'Assinado') -ne $true -or ([string](Get-ObjectValue $item 'Provedor')) -notmatch '(?i)^Broadcom\b' -or
-            $null -eq (Compare-DottedVersion ([string](Get-ObjectValue $item 'Versao')) '214.0.0.6')) { return $falha }
+        $id = [string](Get-ObjectValue $item 'PnpDeviceID')
+        if ($id -notmatch '(?i)^PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})(?:&[^\\]*)?\\[^\\]+$') { $falha.Motivo='Identidade PCI/PNP ausente ou inválida no CIM.'; return $falha }
+        $chaveId = ('{0}:{1}:{2}:{3}' -f $Matches[1],$Matches[2],$Matches[4],$Matches[3]).ToUpperInvariant()
+        if ($chaveId -ne (Get-PciDeviceKey $item)) { $falha.Motivo='A identidade PNP diverge dos PCI IDs normalizados.'; return $falha }
+        if ((Get-ObjectValue $item 'Assinado') -isnot [bool] -or (Get-ObjectValue $item 'Assinado') -ne $true) { $falha.Motivo='O CIM não confirmou a assinatura de todos os drivers associados.'; return $falha }
+        if ($null -eq (Compare-DottedVersion ([string](Get-ObjectValue $item 'Versao')) $Definicao.VersaoDriver)) { $falha.Motivo='Versão de driver CIM zero ou não comparável ao espaço de versão validado.'; return $falha }
     }
-    $versoes = @($evidencias | ForEach-Object { [string](Get-ObjectValue $_ 'Versao') } | Select-Object -Unique)
-    if ($versoes.Count -ne 1) {
-        $falha.Motivo = 'As interfaces Broadcom têm versões de driver diferentes. Consulte drivers-windows.json; não foi atribuída uma versão arbitrária à família.'
-        return $falha
+    # Provedor é dado de auditoria, não critério de aplicabilidade. Versões distintas
+    # geram grupos próprios, sem escolher uma versão para toda a família.
+    $grupos = @($evidencias | Group-Object Versao | ForEach-Object {
+        [pscustomobject]@{Versao=$_.Name; Quantidade=$_.Count
+            InfName=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'InfName'} | Select-Object -Unique) -join ' | ')
+            Provedor=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'Provedor'} | Select-Object -Unique) -join ' | ')
+            PnpDeviceIDs=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'PnpDeviceID'}) -join ' | ')
+        }
+    })
+    return [pscustomobject]@{Valido=$true; Grupos=$grupos; Motivo=''}
+}
+
+function New-DellDriverAssessmentRows {
+    param($Base, [object[]]$Definicoes, [object[]]$Inventario, [object[]]$DriversWindows, [object[]]$Downloads, [string]$SO)
+    $referencia = Get-DellDriverReference -Definicoes $Definicoes -Downloads $Downloads -SO $SO
+    if (-not $referencia.Valido) { $Base.Motivo=$referencia.Motivo; return $Base }
+    $def = $referencia.Definicao
+    $instalados = Get-DellInstalledDriverGroups -Inventario $Inventario -DriversWindows $DriversWindows -Definicao $def
+    if (-not $instalados.Valido) { $Base.Motivo=$instalados.Motivo; return $Base }
+    foreach ($grupo in $instalados.Grupos) {
+        $linha = $Base.PSObject.Copy()
+        if ($instalados.Grupos.Count -gt 1) { $linha.Componente += " [$($grupo.Quantidade) dispositivo(s), $($def.EspacoVersao) $($grupo.Versao)]" }
+        $linha.VersaoAtual=$grupo.Versao; $linha.VersaoNova=$def.VersaoDriver
+        $linha.FonteVersao="CIM Win32_PnPSignedDriver; versão $($def.EspacoVersao)"
+        $linha.InfName=$grupo.InfName; $linha.QuantidadeDispositivosDriver=[string]$grupo.Quantidade
+        $linha.ProvedorDriver=$grupo.Provedor; $linha.PnpDeviceIDs=$grupo.PnpDeviceIDs
+        $linha.Categoria=[string](Get-ObjectValue $referencia.Pacote 'CatName')
+        $linha.Criticidade=ConvertTo-CriticalityLabel ([string](Get-ObjectValue $referencia.Pacote 'Imp'))
+        if (-not $linha.Criticidade) { $linha.Criticidade='Não informada' }
+        $linha.DataDeLancamento=$referencia.Data.ToString('yyyy-MM-dd')
+        $linha.NomeDoPacote=$def.Arquivo
+        $linha.URL='https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid='+$def.DriverId
+        $comparacao=Compare-DottedVersion $grupo.Versao $def.VersaoDriver
+        if ($comparacao -lt 0) { $linha.Status='Pendente' }
+        elseif ($comparacao -eq 0) { $linha.Status='Atualizado na referência' }
+        else { $linha.Status='Acima da referência' }
+        $linha.Motivo="Driver associado por identidade PCI completa e metadados do pacote Dell $($def.DriverId); comparação $($def.EspacoVersao). Provedor instalado é informativo. Validar combinação firmware/driver e pré-requisitos antes de instalar."
+        $linha
     }
-    return [pscustomobject]@{ Valido=$true; Versao=$versoes[0]; InfName=(@($evidencias | ForEach-Object { Get-ObjectValue $_ 'InfName' } | Select-Object -Unique) -join ' | '); Quantidade=$interfaces.Count; Motivo='' }
 }
 
 function Get-SiteReleaseDate {
@@ -1044,8 +1183,24 @@ function Get-SiteWindowsPackage {
 }
 
 function New-SiteAssessmentRows {
-    param([object[]]$Inventario, [object[]]$Downloads, [string]$Hostname, [string]$ServiceTag, [string]$Modelo, [string]$SO, [object[]]$DriversWindows = @())
-    foreach ($instalado in $Inventario) {
+    param([object[]]$Inventario, [object[]]$Downloads, [string]$Hostname, [string]$ServiceTag, [string]$Modelo, [string]$SO, [object[]]$DriversWindows = @(), [object[]]$MetadadosDrivers = $null)
+    if ($null -eq $MetadadosDrivers) { $MetadadosDrivers = @(Get-DellDriverDefinitions) }
+    $familiasProcessadas = @{}
+    $inventarioAvaliacao = @($Inventario)
+    # Nem todo modelo/coletor fornece um registro DRVR de família. A evidência
+    # local de hardware e um pacote Dell na referência permitem completar a lista.
+    foreach ($def in $MetadadosDrivers) {
+        if ($def.Classe -ne 'NET' -or $SO -notin $def.Sistemas) { continue }
+        $jaExiste = @($inventarioAvaliacao | Where-Object {
+            $cidExistente = [string](Get-ObjectValue $_ 'ComponentID')
+            $_.Tipo -eq 'DRVR' -and (($cidExistente -and $cidExistente -in $def.ComponentIDs) -or (-not $cidExistente -and $_.Nome -eq $def.NomeInventario))
+        }).Count
+        if ($jaExiste) { continue }
+        if (@($Downloads | Where-Object { $_.Type -eq 'DRVR' -and $_.DriverId -eq $def.DriverId }).Count -eq 0) { continue }
+        if (@($DriversWindows | Where-Object { (Get-PciDeviceKey $_) -in $def.PerfisPCI }).Count -eq 0) { continue }
+        $inventarioAvaliacao += [pscustomobject]@{Nome=$def.NomeInventario;Tipo='DRVR';Versao='Não informada pelo DSU';ComponentID=$def.ComponentIDs[0];OrigemComplementar='CIM'}
+    }
+    foreach ($instalado in $inventarioAvaliacao) {
         if ($instalado.Tipo -in @('APAC', 'APP', 'EAPP')) { continue }
         $resultado = [pscustomobject][ordered]@{
             Hostname = $Hostname; ServiceTag = $ServiceTag; Modelo = $Modelo
@@ -1054,6 +1209,7 @@ function New-SiteAssessmentRows {
             Status = 'Inconclusivo'; Motivo = ''; URL = ''
             FonteVersao = 'Inventário DSU'; VersaoDSU = $instalado.Versao
             InfName = ''; QuantidadeDispositivosDriver = ''
+            ProvedorDriver = ''; PnpDeviceIDs = ''
         }
         # Só o CSV de verificação recebe estes campos; o principal mantém 10 colunas.
         foreach ($campo in @('ModeloDispositivo','ComponentID','FQDD','VendorID','DeviceID','SubVendorID','SubDeviceID','Bus','Device','Function','Enumerador')) {
@@ -1067,6 +1223,17 @@ function New-SiteAssessmentRows {
             $resultado.Motivo = 'Tipo de componente ausente ou desconhecido no inventário; registro preservado para revisão.'
             $resultado
             continue
+        }
+        if ($instalado.Tipo -eq 'DRVR') {
+            $cid = [string](Get-ObjectValue $instalado 'ComponentID')
+            $definicoes = @($MetadadosDrivers | Where-Object { ($cid -and $cid -in $_.ComponentIDs) -or (-not $cid -and $instalado.Nome -eq $_.NomeInventario) })
+            if ($definicoes.Count) {
+                $chaveFamilia = if ($cid) { 'ComponentID:'+$cid } else { 'Nome:'+$instalado.Nome }
+                if ($familiasProcessadas.ContainsKey($chaveFamilia)) { continue }
+                $familiasProcessadas[$chaveFamilia] = $true
+                New-DellDriverAssessmentRows -Base $resultado -Definicoes $definicoes -Inventario $Inventario -DriversWindows $DriversWindows -Downloads $Downloads -SO $SO
+                continue
+            }
         }
         # Regras deliberadamente específicas: o título genérico de uma NIC/disco
         # e a versão do pacote não comprovam a versão do firmware de cada dispositivo.
@@ -1091,20 +1258,6 @@ function New-SiteAssessmentRows {
         elseif ($instalado.Tipo -eq 'FRMW' -and $perfilBroadcom) {
             $modoBroadcom = 'Firmware'
             $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverId -eq 'DFF48' -and $_.DriverName -match '(?i)Broadcom.*NetXtreme(?!-E)' })
-        }
-        elseif ($instalado.Tipo -eq 'DRVR' -and (Get-ObjectValue $instalado 'ComponentID') -eq '8641' -and $instalado.Nome -eq 'Broadcom NetXtreme Driver Family') {
-            $modoBroadcom = 'Driver'
-            $driverWindows = Get-BroadcomInstalledDriver -Inventario $Inventario -DriversWindows $DriversWindows
-            if (-not $driverWindows.Valido) {
-                $resultado.Motivo = $driverWindows.Motivo
-                $resultado
-                continue
-            }
-            $resultado.VersaoAtual = $driverWindows.Versao
-            $resultado.FonteVersao = 'CIM Win32_PnPSignedDriver; versão NDIS'
-            $resultado.InfName = $driverWindows.InfName
-            $resultado.QuantidadeDispositivosDriver = [string]$driverWindows.Quantidade
-            $candidatos = @($Downloads | Where-Object { $_.Type -eq 'DRVR' -and $_.DriverId -eq '49X84' -and $_.DriverName -match '(?i)Broadcom' -and $_.DriverName -match '(?i)NetXtreme(?!-E)' })
         }
         else {
             $resultado.Motivo = 'Não há regra validada para associar a identidade deste dispositivo e sua versão ao pacote Dell. Consulte os identificadores no CSV de verificação; ausência de regra não significa ausência de atualização.'
@@ -1138,16 +1291,6 @@ function New-SiteAssessmentRows {
                 continue
             }
         }
-        if ($modoBroadcom -eq 'Driver') {
-            # A versão de família 21.80.3 NÃO é a versão do driver NDIS 214.0.0.6.
-            # Mapeamento confirmado nas notas oficiais do pacote 49X84.
-            if ($nova -cne '21.80.3' -or $SO -notin @('WST14','WS19L')) {
-                $resultado.Motivo = 'Pacote/Windows fora do mapeamento NDIS validado para 49X84; associação inconclusiva.'
-                $resultado
-                continue
-            }
-            $nova = '214.0.0.6'
-        }
         $resultado.VersaoNova = $nova
         $resultado.Categoria = [string](Get-ObjectValue $pacote 'CatName')
         $resultado.Criticidade = ConvertTo-CriticalityLabel ([string](Get-ObjectValue $pacote 'Imp'))
@@ -1169,7 +1312,6 @@ function New-SiteAssessmentRows {
             $resultado.Motivo += ' Associação pelos quatro PCI IDs do package.xml do DFF48; comparação da Family Firmware Version, sem executar DUP. Validar combinação de firmware/driver antes de instalar.'
             if ($SO -eq 'WST14') { $resultado.Motivo += ' Windows Server 2016 não consta nos SOs listados para DFF48; a pendência de firmware não autoriza executar esse DUP no Windows 2016. Validar método de atualização fora do SO com a Dell.' }
         }
-        if ($modoBroadcom -eq 'Driver') { $resultado.Motivo += ' Comparação NDIS para todas as interfaces do perfil; 49X84: família 21.80.3, driver NDIS 214.0.0.6. Não são atualizações do Windows.' }
         $resultado
     }
 }
@@ -1273,7 +1415,7 @@ try {
         $driversWindows = @()
         try {
             $driversWindows = @(Get-DellWindowsNetworkDrivers)
-            Write-Log "Drivers de rede locais dos perfis Dell implementados: $($driversWindows.Count). Consulta CIM, sem Windows Update."
+            Write-Log "Drivers de interfaces PCI de rede coletados: $($driversWindows.Count). A comparação exige metadados de pacote Dell; sem Windows Update."
         }
         catch { Write-Log "Não foi possível obter drivers de rede pelo CIM: $($_.Exception.Message). Os casos sem evidência permanecem inconclusivos." 'AVISO' }
         [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'drivers-windows.json'), (ConvertTo-Json -InputObject @($driversWindows) -Depth 5), (New-Object Text.UTF8Encoding($true)))

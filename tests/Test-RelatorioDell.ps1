@@ -779,7 +779,7 @@ Getting System Inventory ...
         $nics = @($avaliacoes | Where-Object Componente -like '*NetXtreme*')
         Assert-Equal 7 $nics.Count
         foreach ($nic in $nics) { Assert-Equal 'Inconclusivo' $nic.Status }
-        Assert-True (@($nics | Where-Object { $_.Motivo -match 'zero' }).Count -eq 1)
+        Assert-True (@($nics | Where-Object { $_.VersaoDSU -eq '0.0.0' -and $_.Status -eq 'Inconclusivo' }).Count -eq 1)
     }
     Test-Case 'PERC H730 nao e confundida com H730P por prefixo de nome' {
         $outra = @([pscustomobject]@{ Nome = 'PERC H730 Mini Firmware'; Tipo = 'FRMW'; Versao = '25.5.3.0005' })
@@ -1098,27 +1098,29 @@ Getting System Inventory ...
             Assert-Equal $esperado $driver.Status
         }
     }
-    Test-Case 'Driver CIM parcial duplicado sem assinatura ou Microsoft permanece inconclusivo' {
-        Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario @()).Valido)
-        Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario $driversTeste[0..4]).Valido)
-        foreach ($campo in @('Assinado','Provedor','Versao','PnpDeviceID','SubDeviceID')) {
+    $definicaoDriver = @(Get-DellDriverDefinitions)[0]
+    Test-Case 'Driver CIM parcial duplicado sem assinatura ou com identidade divergente permanece inconclusivo' {
+        Assert-True (-not (Get-DellInstalledDriverGroups $xmlInventario @() $definicaoDriver).Valido)
+        Assert-True (-not (Get-DellInstalledDriverGroups $xmlInventario $driversTeste[0..4] $definicaoDriver).Valido)
+        foreach ($campo in @('Assinado','Versao','PnpDeviceID','SubDeviceID')) {
             $evidencias = @($driversTeste | ForEach-Object {$_.PSObject.Copy()})
             switch ($campo) {
                 Assinado {$evidencias[0].Assinado=$false}
-                Provedor {$evidencias[0].Provedor='Microsoft'}
                 Versao {$evidencias[0].Versao='0.0.0.0'}
                 PnpDeviceID {$evidencias[0].PnpDeviceID=$evidencias[1].PnpDeviceID}
                 SubDeviceID {$evidencias[0].SubDeviceID='FFFF'}
             }
-            Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario $evidencias).Valido)
+            Assert-True (-not (Get-DellInstalledDriverGroups $xmlInventario $evidencias $definicaoDriver).Valido)
         }
     }
-    Test-Case 'Drivers de versoes diferentes nao sao resumidos por escolha arbitraria' {
+    Test-Case 'Drivers de versoes diferentes geram grupos separados com estados independentes' {
         $evidencias = @($driversTeste | ForEach-Object {$_.PSObject.Copy()})
         $evidencias[0].Versao='214.0.0.6'
-        $r = Get-BroadcomInstalledDriver $xmlInventario $evidencias
-        Assert-True (-not $r.Valido)
-        Assert-True ($r.Motivo -match 'diferentes')
+        $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $evidencias | Where-Object ComponentID -eq '8641')
+        Assert-Equal 2 $r.Count
+        Assert-Equal 1 @($r | Where-Object Status -eq Pendente).Count
+        Assert-Equal 1 @($r | Where-Object Status -eq 'Atualizado na referência').Count
+        Assert-Equal '1' @($r | Where-Object Status -eq 'Atualizado na referência')[0].QuantidadeDispositivosDriver
     }
     Test-Case 'Driver 49X84 exige versao de familia e Windows validados' {
         $pacote = $siteDriver.DriverListData[0].PSObject.Copy()
@@ -1135,7 +1137,7 @@ Getting System Inventory ...
         Assert-Equal '0.0.0' $driver.VersaoAtual
         Assert-Equal 6 @($r | Where-Object Status -eq Inconclusivo).Count
     }
-    Test-Case 'Coleta CIM usa apenas NET e preserva somente perfis PCI implementados' {
+    Test-Case 'Coleta CIM usa NET e preserva PCI de qualquer fabricante para posterior associacao' {
         $script:ClasseCimTeste=''; $script:FiltroCimTeste=''
         $script:DriversCimTeste=@(
             [pscustomobject]@{DeviceID='PCI\VEN_14E4&DEV_165F&SUBSYS_06391028&REV_01\EXEMPLO';DeviceName='Broadcom';DriverVersion='214.0.0.5';DriverProviderName='Broadcom';InfName='oem10.inf';IsSigned=$true},
@@ -1147,12 +1149,118 @@ Getting System Inventory ...
             $r = @(Get-DellWindowsNetworkDrivers)
             Assert-Equal 'Win32_PnPSignedDriver' $script:ClasseCimTeste
             Assert-Equal "DeviceClass='NET'" $script:FiltroCimTeste
-            Assert-Equal 1 $r.Count
+            Assert-Equal 2 $r.Count
             Assert-Equal '1028' $r[0].SubVendorID
             Assert-Equal '0639' $r[0].SubDeviceID
             Assert-Equal '214.0.0.5' $r[0].Versao
         }
         finally {Remove-Item Function:\Get-CimInstance}
+    }
+
+    $driversMicrosoft = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\drivers-windows-net-exemplo.json')))
+    Test-Case 'Driver assinado Microsoft e aceito por hardware e referencia Dell sem regra de versao instalada' {
+        $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $driversMicrosoft)
+        $driver = @($r | Where-Object ComponentID -eq '8641')[0]
+        Assert-Equal 'Pendente' $driver.Status
+        Assert-Equal '17.2.1.0' $driver.VersaoAtual
+        Assert-Equal '214.0.0.6' $driver.VersaoNova
+        Assert-Equal 'Microsoft' $driver.ProvedorDriver
+        Assert-Equal 'netb57va.inf' $driver.InfName
+        Assert-Equal '6' $driver.QuantidadeDispositivosDriver
+        Assert-Equal 12 @($r | Where-Object Status -eq Pendente).Count
+        Assert-Equal 5 @($r | Where-Object Status -eq Inconclusivo).Count
+    }
+    Test-Case 'Driver nao depende de nome de provedor INF modelo hostname tag ou quantidade fixa' {
+        foreach ($modeloTeste in @('PowerEdge R350','PowerEdge R530','PowerEdge R740','PowerEdge R750')) {
+            $evidencias=@($driversTeste[0].PSObject.Copy())
+            $evidencias[0].Provedor='Fornecedor Exemplo'
+            $evidencias[0].InfName='outro.inf'
+            $inventarioTeste=@($familia, @($xmlInventario | Where-Object VendorID -eq '14E4')[0])
+            $r=@(New-SiteAssessmentRows $inventarioTeste $downloadsDrivers 'HOST-OUTRO' 'TAG-OUTRA' $modeloTeste WST14 -DriversWindows $evidencias | Where-Object ComponentID -eq '8641')
+            Assert-Equal 'Pendente' $r[0].Status
+            Assert-Equal '1' $r[0].QuantidadeDispositivosDriver
+        }
+    }
+    Test-Case 'Nova identidade PCI do mesmo pacote e atendida pelos dados sem alterar engine' {
+        Assert-Equal 33 @($definicaoDriver.PerfisPCI).Count
+        $nic=@($xmlInventario | Where-Object VendorID -eq '14E4')[0].PSObject.Copy()
+        $nic.DeviceID='1657'; $nic.SubVendorID='14E4'; $nic.SubDeviceID='1904'
+        $evidencia=$driversTeste[0].PSObject.Copy()
+        $evidencia.DeviceID='1657'; $evidencia.SubVendorID='14E4'; $evidencia.SubDeviceID='1904'
+        $evidencia.PnpDeviceID='PCI\VEN_14E4&DEV_1657&SUBSYS_190414E4\OUTRO'
+        $r=@(New-SiteAssessmentRows @($familia,$nic) $downloadsDrivers X Y 'PowerEdge R740' WST14 -DriversWindows @($evidencia) | Where-Object ComponentID -eq '8641')
+        Assert-Equal 'Pendente' $r[0].Status
+    }
+    Test-Case 'Engine aceita outro fabricante e pacote somente por metadados sinteticos' {
+        $def=[pscustomobject]@{Id='METADADO-TESTE';ComponentIDs=@('9000');NomeInventario='Familia Exemplo';Classe='NET';FamiliasPCI=@('8086:1234');PerfisPCI=@('8086:1234:1028:ABCD');DriverId='A1B2C';VersaoFamilia='9.0';VersaoDriver='2.2.0.0';EspacoVersao='NDIS';Sistemas=@('WS19L');Arquivo='Driver_Teste.EXE';TipoArquivo='LW64';Fonte='fixture sintetico'}
+        $node=[pscustomobject]@{Tipo='DRVR';Nome='Familia Exemplo';Versao='0';ComponentID='9000'}
+        $cim=[pscustomobject]@{VendorID='8086';DeviceID='1234';SubVendorID='1028';SubDeviceID='ABCD';PnpDeviceID='PCI\VEN_8086&DEV_1234&SUBSYS_ABCD1028\SINTETICO';Versao='2.1.0.0';Provedor='Microsoft';Assinado=$true;InfName='exemplo.inf'}
+        $pkg=[pscustomobject]@{Type='DRVR';DriverId='A1B2C';DellVer='9.0, A00';DriverName='Pacote Exemplo';CatName='Rede';Imp='Recommended';ReleaseDate='01 Jan 2026';FileFrmtInfo=[pscustomobject]@{FileName='Driver_Teste.EXE';FileType='LW64'}}
+        $r=@(New-SiteAssessmentRows @($node) @($pkg) X Y 'PowerEdge R7525' WS19L -DriversWindows @($cim) -MetadadosDrivers @($def))
+        Assert-Equal 'Pendente' $r[0].Status
+        Assert-Equal '2.2.0.0' $r[0].VersaoNova
+        Assert-Equal 'Driver_Teste.EXE' $r[0].NomeDoPacote
+    }
+    Test-Case 'Pacote ausente arquivo trocado versao ou SO divergente nao geram pendencia' {
+        foreach($campo in @('DriverId','DellVer','FileFrmtInfo')) {
+            $pkg=$siteDriver.DriverListData[0].PSObject.Copy()
+            switch($campo) {
+                DriverId {$pkg.DriverId='OUTRO'}
+                DellVer {$pkg.DellVer='99.0, A00'}
+                FileFrmtInfo {$pkg.FileFrmtInfo=[pscustomobject]@{FileName='Outro.EXE';FileType='LW64'}; $pkg.OthFileFrmts=@()}
+            }
+            $r=@(New-SiteAssessmentRows $xmlInventario @($pkg) X Y Z WST14 -DriversWindows $driversMicrosoft | Where-Object ComponentID -eq '8641')
+            Assert-Equal 'Inconclusivo' $r[0].Status
+        }
+    }
+    Test-Case 'PNP e PCI normalizado divergentes sao recusados mesmo com assinatura e provedor Microsoft' {
+        $evidencias=@($driversMicrosoft | ForEach-Object {$_.PSObject.Copy()})
+        $evidencias[0].PnpDeviceID='PCI\VEN_14E4&DEV_165F&SUBSYS_200314E4\DIVERGENTE'
+        $r=Get-DellInstalledDriverGroups $xmlInventario $evidencias $definicaoDriver
+        Assert-True (-not $r.Valido)
+        Assert-True ($r.Motivo -match 'diverge')
+    }
+    Test-Case 'Referencias conflitantes na mesma data permanecem inconclusivas' {
+        $outra=$definicaoDriver.PSObject.Copy(); $outra.VersaoDriver='215.0.0.0'
+        $r=Get-DellDriverReference @($definicaoDriver,$outra) $downloadsDrivers WST14
+        Assert-True (-not $r.Valido)
+        Assert-True ($r.Motivo -match 'ambígua')
+    }
+    Test-Case 'CSV preserva dez colunas e auditoria rastreia grupos de driver e provedor' {
+        $r=@(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $driversMicrosoft)
+        $arquivo=Join-Path $pastaTeste 'driver-generico.csv'
+        Export-SiteAssessment $r $arquivo X Y Z
+        $csv=@(Import-Csv $arquivo -Delimiter ';' -Encoding UTF8)
+        Assert-Equal 10 @($csv[0].PSObject.Properties).Count
+        $auditoria=@(Import-Csv (Join-Path $pastaTeste 'driver-generico_Verificacao.csv') -Delimiter ';' -Encoding UTF8 | Where-Object ComponentID -eq '8641')
+        Assert-Equal 'Microsoft' $auditoria[0].ProvedorDriver
+        Assert-Equal 6 @($auditoria[0].PnpDeviceIDs -split ' \| ').Count
+    }
+    Test-Case 'Metadados excluem dispositivos de outras familias mesmo quando presentes na lista ampla do DUP' {
+        Assert-True ('14E4:16DE:14E4:4120' -notin $definicaoDriver.PerfisPCI)
+        Assert-True ('14E4:165A:14E4:165A' -notin $definicaoDriver.PerfisPCI)
+        Assert-True ('14E4:1657:14E4:1904' -in $definicaoDriver.PerfisPCI)
+    }
+    Test-Case 'Familia repetida no inventario nao duplica o mesmo conjunto de drivers' {
+        $r=@(New-SiteAssessmentRows (@($xmlInventario)+@($familia.PSObject.Copy())) $downloadsDrivers X Y Z WST14 -DriversWindows $driversMicrosoft)
+        Assert-Equal 1 @($r | Where-Object ComponentID -eq '8641').Count
+        Assert-Equal 19 $r.Count
+    }
+    Test-Case 'Referencia de outra classe ou versao de driver invalida nao pode usar evidencia NET' {
+        foreach($campo in @('Classe','VersaoDriver')) {
+            $def=$definicaoDriver.PSObject.Copy()
+            $def.$campo='INVALIDO'
+            $r=Get-DellDriverReference @($def) $downloadsDrivers WST14
+            Assert-True (-not $r.Valido)
+        }
+    }
+    Test-Case 'Driver CIM pode complementar inventario sem registro de familia DSU em outro modelo' {
+        $semFamilia=@($xmlInventario | Where-Object {$_.ComponentID -ne '8641'})
+        $r=@(New-SiteAssessmentRows $semFamilia $downloadsDrivers X Y 'PowerEdge R740' WST14 -DriversWindows $driversMicrosoft | Where-Object ComponentID -eq '8641')
+        Assert-Equal 1 $r.Count
+        Assert-Equal 'Pendente' $r[0].Status
+        Assert-Equal 'Não informada pelo DSU' $r[0].VersaoDSU
+        Assert-Equal '17.2.1.0' $r[0].VersaoAtual
     }
 
     Test-Case 'Wrapper nativo captura stdout e stderr e encerra sem pipe bloqueado' {

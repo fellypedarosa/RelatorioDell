@@ -2,7 +2,7 @@
 
 Script PowerShell para apoiar a análise de atualizações em servidores Dell PowerEdge com Windows Server. Compara versões instaladas com uma referência Dell e gera CSV, log e arquivos de diagnóstico. **Não instala atualizações nem reinicia o servidor.**
 
-**Escopo:** BIOS, firmwares e drivers de hardware disponibilizados no suporte Dell. Isso inclui componentes de fabricantes como Broadcom e Intel; o driver não precisa ter autoria da Dell para fazer parte do hardware do PowerEdge. Patches do Windows, atualizações cumulativas e aplicativos ficam com o **Endpoint Central**. O script não consulta Windows Update. A consulta CIM descrita abaixo lê somente dados locais dos drivers de rede dos perfis implementados.
+**Escopo:** BIOS, firmwares e drivers de hardware disponibilizados no suporte Dell. Isso inclui componentes de fabricantes como Broadcom e Intel; o driver não precisa ter autoria da Dell para fazer parte do hardware do PowerEdge. Patches do Windows, atualizações cumulativas e aplicativos ficam com o **Endpoint Central**. O script não consulta Windows Update. O CIM lê dados locais de interfaces PCI de rede; somente uma referência Dell validada permite classificá-las como pendentes.
 
 ## Resumo: como ele pesquisa em cada servidor
 
@@ -152,12 +152,30 @@ O tipo informado pelo DSU separa `BIOS`, `FRMW` e `DRVR`. Aplicativos `APAC`, `A
 | CPLD | Para `System CPLD`, procura firmware com `CPLD` no título. |
 | Discos com regra XML | Exige firmware, FQDD de disco em baia, modelo e ComponentID específicos. Confere também DriverId e modelo no título do pacote. Aceita somente os pares de versões explicitados abaixo. |
 | Firmware Broadcom BCM5720 | Compara FFV com DFF48 somente nos dois perfis PCI completos documentados abaixo. A versão do bootcode não é usada como FFV. |
-| Driver Broadcom NetXtreme | Para ComponentID `8641`, usa CIM completo das interfaces e mapeia 49X84/família `21.80.3` para NDIS `214.0.0.6`, em Windows Server 2016/2019. |
+| Drivers de rede PCI | Engine comum guiada por metadados de pacote, hardware, SO e espaço de versão. A base inicial é 49X84/NDIS, com 33 perfis PCI e Windows Server 2016/2019; não depende do modelo PowerEdge. |
 | Outras NICs/discos, fontes e demais drivers/firmwares | Continuam inconclusivos quando não há regra específica para associar identidade e versão. IDs sozinhos não bastam para presumir a correspondência. |
 
 BIOS/iDRAC/PERC/CPLD usam **tipo e textos de identificação/família**; discos usam também ComponentID e FQDD; Broadcom usa os quatro PCI IDs do XML. O script não executa a verificação de compatibilidade do DUP e não comprova todas as pré-condições de instalação. Uma pendência identificada aqui deve ser validada na página do pacote antes de uma eventual atualização. A Dell distingue descoberta automática e downloads manuais em seu [guia de atualização PowerEdge][metodos-dell].
 
-#### Broadcom: firmware e driver são verificações diferentes
+#### Drivers de rede: associação por metadados, independente do modelo
+
+A engine de drivers separa **dados do pacote** de **lógica de comparação**. `Get-DellDriverDefinitions` contém os dados de referência incorporados ao `.ps1`; não é preciso copiar um arquivo auxiliar para o servidor. Cada entrada informa ComponentID/nome do inventário, famílias e tuplas PCI completas, Windows atendido, DriverId, arquivo/tipo do DUP e a versão efetiva do driver, distinguindo-a da versão de família/suíte.
+
+O fluxo é:
+
+1. Coleta as interfaces PCI da classe `NET` pelo CIM, independentemente do fabricante ou provedor instalado.
+2. Seleciona somente pacotes presentes na referência Dell consultada/importada, conferindo DriverId, versão de família, nome/tipo do arquivo, SO e data. Referências conflitantes na mesma data ficam inconclusivas.
+3. Confere VendorID, DeviceID, SubVendorID e SubDeviceID. O ID da instância PNP deve ser coerente com esses quatro campos, conforme os [identificadores PCI documentados pela Microsoft][pci-identificadores].
+4. Exige versão comparável, assinatura informada pelo CIM e IDs de instância únicos. Quando o XML lista as interfaces, exige cobertura por perfil e quantidade; não há quantidade fixa de placas ou portas.
+5. Compara cada grupo de versão instalada separadamente. Um servidor com versões distintas pode ter uma linha pendente e outra atualizada para a mesma família, com quantidade, provedor, INF e instâncias rastreáveis no CSV de verificação.
+
+**O provedor instalado é informativo.** Um driver assinado com provedor `Microsoft` pode ser comparado com um pacote Dell se o hardware, SO e versões estiverem associados. Não há exceção para `17.2.1.0`, `netb57va.inf`, hostname, Service Tag ou R530 na engine. Se o DSU não trouxer um registro DRVR de família, o CIM pode complementar o inventário quando houver hardware reconhecido e pacote Dell correspondente na referência. Isso não adiciona patches do Windows ao escopo.
+
+**Cobertura atual não é universal:** o mecanismo é genérico, mas a base de metadados começa com o pacote 49X84. O driver cobre **33 perfis PCI**, derivados da interseção entre `SupportedDevices/PCIInfo` do `package.xml` e as famílias `14E4:1657`/`14E4:165F` declaradas no `nxUDUPconfig.xml`. A lista ampla do DUP contém outros dispositivos; eles não foram incluídos apenas por aparecerem nela. A [evidência da generalização](docs/evidencias/drivers-genericos-2026-10-29.json) registra essa seleção e as fontes.
+
+Para acrescentar outro fabricante/pacote, valide os metadados Dell de dispositivos atendidos, o SO e a versão efetiva do driver (INF/notas técnicas), registre a proveniência e acrescente uma entrada de dados e regressões. A lógica não deve ganhar condições por modelo de servidor ou provedor. Um pacote sem essa evidência continua inconclusivo. As regras anteriores de firmware e discos mantêm sua cobertura documentada; esta generalização é da associação de drivers de rede.
+
+#### Broadcom: referências de firmware e driver da amostra
 
 Foram baixados os pacotes oficiais [DFF48][broadcom-fw] e [49X84][broadcom-driver] e extraídos estaticamente com 7-Zip, sem executar os instaladores, scripts ou payloads. Os SHA256 coincidiram com os publicados pela Dell e a verificação Authenticode local retornou `Valid`, assinante Dell Inc. A proveniência, hashes e limites estão em [evidência Broadcom de 29/10/2026](docs/evidencias/broadcom-2026-10-29.json). **7-Zip não é dependência do script no servidor**: foi usado somente nesta investigação. A execução do relatório usa as regras incorporadas e não baixa esses pacotes.
 
@@ -174,9 +192,9 @@ Firmware usa somente o pacote DFF48 presente na referência selecionada, versão
 
 Para o **driver**, o coletor `nxUDUPconfig.xml` do 49X84 usa o ComponentID `8641`, consulta `HKLM\SOFTWARE\Dell\MUP\Broadcom\UInstaller\Product_Version` e tem `0.0.0` como valor padrão sem versão. Isso explica como um zero pode aparecer, mas não comprova qual condição ocorreu no Registro do servidor. O script não executa esse VBS nem depende dessa chave para decidir o estado do driver.
 
-A nova consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. Só compara a família quando todas as interfaces Broadcom do XML têm correspondência por perfil e quantidade, IDs de instância únicos, assinatura indicada pelo CIM, provedor Broadcom e uma versão comum válida. Dados ausentes, versões diferentes ou falha CIM preservam o inconclusivo. A consulta tem timeout de operação de 30 segundos; sua falha não é tratada como driver atualizado.
+A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. A consulta tem timeout de operação de 30 segundos; sua falha não é tratada como driver atualizado. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
 
-As [notas oficiais do 49X84][broadcom-driver-notas] distinguem a família `21.80.3` do driver **NDIS `214.0.0.6`**. `VersaoAtual`/`VersaoNova` passam a usar NDIS nessa linha; a versão zero original permanece em `VersaoDSU`. O nome do pacote continua contendo sua versão de família. O mapeamento implementado é restrito a Windows Server 2016/2019. Versões reais do servidor precisam ser coletadas na próxima execução; os testes CIM usam dados sintéticos.
+As [notas oficiais do 49X84][broadcom-driver-notas] distinguem a família `21.80.3` do driver **NDIS `214.0.0.6`**. `VersaoAtual`/`VersaoNova` usam NDIS nessa linha; a versão zero original permanece em `VersaoDSU`. O nome do pacote continua contendo sua versão de família. O mapeamento validado é restrito a Windows Server 2016/2019. A coleta real recebida confirmou seis drivers `17.2.1.0`, provedor Microsoft, assinados segundo o CIM; o reprocessamento com a nova engine está registrado abaixo.
 
 Firmware e driver são comparados separadamente. Isso **não certifica que DFF48 e 49X84 formem uma combinação recomendada**: as notas Dell condicionam o uso a versões compatíveis. A instalação exige conferir a combinação no procedimento de manutenção.
 
@@ -309,7 +327,7 @@ Hostname;ServiceTag;Modelo;Componente;Categoria;VersaoAtual;VersaoNova;Criticida
 
 Contém as pendências identificadas, ordenadas por **Urgente → Recomendado → Opcional**. Se houver componentes inconclusivos, acrescenta uma linha de aviso de **verificação parcial**, inclusive quando nenhuma pendência tiver sido identificada.
 
-O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo`, `URL`, `FonteVersao`, `VersaoDSU`, `InfName`, `QuantidadeDispositivosDriver`, `ModeloDispositivo`, `ComponentID`, `FQDD`, `VendorID`, `DeviceID`, `SubVendorID`, `SubDeviceID`, `Bus`, `Device`, `Function` e `Enumerador` às dez colunas. Identificadores ficam vazios quando não fornecidos pelo inventário. Ele permite revisar as associações e localizar a baia de cada disco:
+O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo`, `URL`, `FonteVersao`, `VersaoDSU`, `InfName`, `QuantidadeDispositivosDriver`, `ProvedorDriver`, `PnpDeviceIDs`, `ModeloDispositivo`, `ComponentID`, `FQDD`, `VendorID`, `DeviceID`, `SubVendorID`, `SubDeviceID`, `Bus`, `Device`, `Function` e `Enumerador` às dez colunas. Identificadores ficam vazios quando não fornecidos pelo inventário. Ele permite revisar as associações e localizar a baia de cada disco:
 
 | Status | Interpretação dentro das regras atuais |
 | --- | --- |
@@ -385,7 +403,9 @@ Para ajustar uma diferença de formato entre versões, revise os arquivos brutos
 | `Get-SiteInventoryArguments` / `Get-DsuSiteInventory` | Verificação da ajuda e coleta automática XML; erro se o arquivo solicitado estiver ausente/inválido. |
 | `Get-DellDiskRule` / `Compare-DellDiskVersion` | Identidade/pacote e pares alfanuméricos explícitos, sem ordenação genérica. |
 | `Get-BroadcomPciProfile` | Tuplas PCI completas verificadas nos metadados Dell. |
-| `Get-DellWindowsNetworkDrivers` / `Get-BroadcomInstalledDriver` | Coleta CIM restrita, conferência de todas as interfaces e versão NDIS; sem Windows Update. |
+| `Get-DellWindowsNetworkDrivers` / `Get-PciDeviceKey` | Coleta PCI/NET e normalização de identidade; sem Windows Update. |
+| `Get-DellDriverDefinitions` / `Get-DellDriverReference` | Dados incorporados de pacotes e seleção por identidade, arquivo, versão e SO; sem regras por modelo. |
+| `Get-DellInstalledDriverGroups` / `New-DellDriverAssessmentRows` | Confere assinatura/instâncias e compara grupos de versões; provedor é informativo. |
 | `New-SiteAssessmentRows` | Regras locais de associação. É o ponto para ampliar cobertura com evidência e testes. |
 | `Compare-DottedVersion` | Comparação de segmentos numéricos. |
 | `Export-SiteAssessment` | CSV principal, aviso de cobertura parcial e CSV de verificação. |
@@ -431,6 +451,7 @@ tests/
     dell-r530-resumo.json            # seis registros reais, reduzidos para os testes
     dell-r530-discos.json            # dois pacotes de disco da captura de 29/10/2026
     dell-r530-broadcom-driver.json   # pacote 49X84; evidências CIM dos testes são sintéticas
+    drivers-windows-net-exemplo.json # dados reais de versão/provedor, identidades anonimizadas
 ```
 
 As pastas `backup_antes_API_...` e `Exemplos` eram cópias de segurança/relatórios gerados na preparação e foram retiradas da árvore do projeto. Não são dependências. `tests` é mantida para permitir que outros analistas reproduzam a validação. Os relatórios reais gerados em operação não devem integrar os arquivos fonte do projeto.
@@ -441,7 +462,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **107 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **119 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -493,17 +514,25 @@ Esse resultado valida o **reprocessamento local dos arquivos recebidos**, não u
 
 O modo Site salva `inventory.normalizado.json` com as instâncias e IDs disponíveis. A coleta automática XML fica em `inventory.xml`; a importação guarda `inventory.importado.xml` ou `.txt` no diagnóstico. O snapshot XML importado é convertido para UTF-8 com declaração coerente, sem alterar o original UTF-16. Esses diagnósticos continuam sendo dados operacionais do cliente.
 
-### Reprocessamento após as regras Broadcom
+### Reprocessamento anterior, com a primeira regra Broadcom
 
 Com os mesmos XML/HAR reais, sem inventar dados CIM do servidor, a revisão posterior produziu **11 pendências identificadas, 2 atualizados na referência e 6 inconclusivos**, mantendo 19 itens em escopo. As seis novas pendências são os firmwares das interfaces Broadcom `20.06.18 → 22.00.6`; referem-se a seis interfaces, não necessariamente seis placas físicas. O pacote aparece uma vez por interface inventariada.
 
-Permanecem inconclusivos: duas fontes, driver Broadcom, Chipset INF, SEP e CPLD. O driver Broadcom pode ser resolvido pela nova coleta CIM no servidor, desde que satisfaça as validações. A redução adicional para cinco inconclusivos foi testada **somente com evidência CIM sintética**; não representa resultado já obtido no servidor. O diagnóstico `drivers-windows.json` preserva a coleta real para revisão. Falha CIM, driver com provedor Microsoft ou pacote ausente não gera sucesso falso.
+Nesse estágio, permaneciam inconclusivos duas fontes, driver Broadcom, Chipset INF, SEP e CPLD. A primeira regra exigia provedor Broadcom; o teste posterior revelou provedor Microsoft, versão `17.2.1.0`, nas seis interfaces. Essa restrição foi substituída pela engine por metadados descrita acima. O diagnóstico `drivers-windows.json` preserva a coleta real para revisão.
 
 O teste confirma identificação e comparação com a referência, sem validar execução do DUP em Windows 2016 ou a combinação entre firmware e driver. As nove regressões Broadcom cobrem identidade PCI completa, FFV, mapeamento NDIS, dados CIM ausentes/parciais/divergentes, assinatura/provedor, versões desconhecidas e escopo de coleta sem Windows Update.
 
+### Validação da engine genérica no ambiente de teste
+
+O reprocessamento local do XML, dos 323 downloads e dos **dados CIM reais recebidos** resultou em **12 pendências, 2 atualizados na referência e 5 inconclusivos**, mantendo 19 registros em escopo. O driver de família passou a pendente: `17.2.1.0 → 214.0.0.6`, seis dispositivos, provedor Microsoft. Essa é uma inferência de versão/applicabilidade pelos metadados, sem execução do DUP ou nova atualização do servidor.
+
+Permanecem inconclusivos as duas fontes, Chipset INF, SEP e CPLD. Não foram descartados para reduzir a contagem. Com versões de driver diferentes, o número de linhas pode crescer, pois cada grupo passa a ter seu próprio resultado. Drivers CIM reconhecidos também podem complementar registros de família ausentes no DSU.
+
+As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, outros nomes de modelo, outro fabricante/pacote **sintéticos**, perfil PCI adicional do pacote real, ausência do registro DRVR, versões distintas, identidade PNP divergente, referência ambígua e rastreabilidade no CSV. Esses testes demonstram independência da lógica em relação ao modelo; não equivalem a execuções físicas em R350/R740/R750 ou validação de todos os fabricantes. Os testes e a revisão dos arquivos ocorrem neste ambiente de teste, sem instalar atualizações.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 107 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 119 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 
@@ -541,6 +570,7 @@ Consultadas em **28 e 29/10/2026**. Diferencie a documentação pública dos pro
 [broadcom-driver-notas]: https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt
 [chipset-inf]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=99gp4
 [cim-driver]: https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/aa394354(v=vs.85)
+[pci-identificadores]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/identifiers-for-pci-devices
 [inventario-dsu]: https://www.dell.com/support/manuals/en-us/system-update/dsu_2.1.0.0_ug/inventory?guid=guid-d1f74624-9edd-4218-998d-d85c90f1c5cc&lang=en-us
 [metodos-dell]: https://www.dell.com/support/kbdoc/en-us/000128194/updating-firmware-and-drivers-on-dell-emc-poweredge-servers
 [catalogos]: https://www.dell.com/support/kbdoc/en-us/000132986/dell-emc-catalog-links-for-poweredge-servers

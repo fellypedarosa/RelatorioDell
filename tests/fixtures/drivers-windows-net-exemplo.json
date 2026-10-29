@@ -1,0 +1,74 @@
+[
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_06391028\\EXEMPLO1",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "1028",
+        "SubDeviceID":  "0639",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    },
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_06391028\\EXEMPLO2",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "1028",
+        "SubDeviceID":  "0639",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    },
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_06391028\\EXEMPLO3",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "1028",
+        "SubDeviceID":  "0639",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    },
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_06391028\\EXEMPLO4",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "1028",
+        "SubDeviceID":  "0639",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    },
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_200314E4\\EXEMPLO5",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "14E4",
+        "SubDeviceID":  "2003",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    },
+    {
+        "PnpDeviceID":  "PCI\\VEN_14E4\u0026DEV_165F\u0026SUBSYS_200314E4\\EXEMPLO6",
+        "Nome":  "Interface de rede exemplo",
+        "VendorID":  "14E4",
+        "DeviceID":  "165F",
+        "SubVendorID":  "14E4",
+        "SubDeviceID":  "2003",
+        "Versao":  "17.2.1.0",
+        "Provedor":  "Microsoft",
+        "InfName":  "netb57va.inf",
+        "Assinado":  true
+    }
+]
