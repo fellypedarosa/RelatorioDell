@@ -1,0 +1,35 @@
+DELL EMC System Update 1.9.2.0
+Copyright (C) 2014 -- 2021 DELL EMC Proprietary.
+Downloading the Index catalog
+Reading the catalog ...
+Verifying inventory collector installation
+Getting System Inventory ...
+
+1. APAC, OpenManage | iDRAC Service Module  ( Version : 3.4.0 )
+2. DRVR, Broadcom NetXtreme Driver Family  ( Version : 0.0.0 )
+3. APAC, OpenManage Server Administrator  ( Version : 10.3.0.0 )
+4. BIOS, BIOS  ( Version : 2.5.4 )
+5. FRMW, Power Supply  ( Version : 00.24.7D )
+6. FRMW, Power Supply  ( Version : 00.24.7D )
+7. DRVR, Chipset INF  ( Version : 0 )
+8. FRMW, 13G SEP Firmware, BayID: 1  ( Version : 2.25 )
+9. FRMW, Firmware for  - Disk 0 in Backplane 1 of PERC H730P Mini Controller 0    ( Version : EG02 )
+10. FRMW, Firmware for  - Disk 1 in Backplane 1 of PERC H730P Mini Controller 0    ( Version : EG03 )
+11. FRMW, Firmware for  - Disk 2 in Backplane 1 of PERC H730P Mini Controller 0    ( Version : LA0B )
+12. FRMW, Firmware for  - Disk 3 in Backplane 1 of PERC H730P Mini Controller 0    ( Version : LA0B )
+13. FRMW, PERC H730P Mini Controller 0 Firmware  ( Version : 25.5.3.0005 )
+14. FRMW, [0002] Broadcom NetXtreme Gigabit Ethernet #2  ( Version : 20.06.18 )
+15. FRMW, [0001] Broadcom NetXtreme Gigabit Ethernet  ( Version : 20.06.18 )
+16. FRMW, [0003] Broadcom NetXtreme Gigabit Ethernet #3  ( Version : 20.06.18 )
+17. FRMW, [0004] Broadcom NetXtreme Gigabit Ethernet #4  ( Version : 20.06.18 )
+18. FRMW, [0005] Broadcom NetXtreme Gigabit Ethernet #5  ( Version : 20.06.18 )
+19. FRMW, [0006] Broadcom NetXtreme Gigabit Ethernet #6  ( Version : 20.06.18 )
+20. APAC, Lifecycle Controller  ( Version : 2.86.86.86 )
+21. APAC, Dell 32 Bit uEFI Diagnostics, version 4239, 4239A36, 4239.44  ( Version : 4239A36 )
+22. APAC, Dell OS Driver Pack, 17.08.10, A00  ( Version : 17.08.10 )
+23. FRMW, Integrated Dell Remote Access Controller  ( Version : 2.86.86.86 )
+24. APAC, OS COLLECTOR 2.1, A00  ( Version : 2.1 )
+25. FRMW, System CPLD  ( Version : 1.0.3 )
+
+Progress report is available at:C:\ProgramData\Dell\DELL EMC System Update\dell_dup\DSU_STATUS.json
+Exiting DSU!

@@ -1,0 +1,11 @@
+# Saídas locais, diagnósticos e relatórios de clientes.
+/Relatorios/
+/Exemplos/
+/DSU_*.csv
+/DSU_*.log
+/DSU_*.csv.tmp
+/DSU_*_diagnostico/
+
+# Cópias transitórias e diretórios exclusivos dos testes.
+/backup_antes_API_*/
+/tests/temporario_*/

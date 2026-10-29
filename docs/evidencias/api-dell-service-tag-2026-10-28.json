@@ -1,0 +1,58 @@
+{
+    "SchemaVersion":  1,
+    "CheckedAtUTC":  "2026-10-28T19:06:16.3887954+00:00",
+    "Purpose":  "Ajuste da consulta padrao para Service Tag; separa evidencia estatica, teste de acesso e testes sinteticos.",
+    "Source":  {
+                   "URL":  "https://www.dellcdn.com/support/driver/bundle/dds2/js/v-1-3-617-613/driver-list.min.js",
+                   "HTTPStatus":  200,
+                   "SHA256":  "5E63FDF1F2C3985ADD55D430865135AC03A1FD9720296B12C7B725E7FDBBB4A5",
+                   "QueryMethod":  "GET",
+                   "Endpoint":  "https://www.dell.com/support/driver/pt-br/dep/api/driverlist/packdriversbytag",
+                   "TagParameterSource":  "DellDnd.productObj.encryptedServiceTag",
+                   "QueryParameters":  [
+                                           "productcode",
+                                           "servicetag",
+                                           "oscode",
+                                           "lob",
+                                           "initialload"
+                                       ],
+                   "FilterExpression":  "r.DriverListData.filter(n=\u003en.IsTagDriver\u003e0)",
+                   "WebsiteCanSwitchToProductList":  true
+               },
+    "Implementation":  {
+                           "Default":  "ServiceTag",
+                           "PageTemplate":  "https://www.dell.com/support/product-details/pt-br/servicetag/{SERVICE_TAG}/drivers",
+                           "TokenResolution":  "URL canonica HTTPS ou contexto da pagina; sem executar JavaScript remoto",
+                           "RequiresMatchingProduct":  true,
+                           "RequiresIsTagBooleanTrue":  true,
+                           "RequiresMatchingIdentity":  true,
+                           "RequiresValidIsTagDriver":  true,
+                           "UsesOnlyPositiveIsTagDriver":  true,
+                           "AutomaticModelFallback":  false,
+                           "ExplicitModelOption":  "-ConsultaSite Modelo"
+                       },
+    "LiveValidation":  {
+                           "PageRequestMethod":  "GET",
+                           "PageRequestHTTPStatus":  403,
+                           "SuccessfulTagDownloadsResponseObserved":  false,
+                           "RealServiceTagIncluded":  false,
+                           "RealOpaqueIdentifierIncluded":  false,
+                           "Note":  "A tentativa de acesso a pagina por tag foi recusada neste ambiente. Nao foi obtida resposta valida de downloads de uma tag real; esta evidencia nao e teste de sucesso end-to-end."
+                       },
+    "OfflineValidation":  {
+                              "PowerShellVersion":  "5.1",
+                              "TestsPassed":  57,
+                              "TestsFailed":  0,
+                              "TagIdentityAndHTTPResponses":  "Sinteticos; ABC1234 e TOKEN_SINTETICO nao representam equipamentos reais",
+                              "Covers":  [
+                                             "resolucao de identificador",
+                                             "filtro IsTagDriver",
+                                             "identidade divergente",
+                                             "resposta por modelo indevida",
+                                             "sem dados por tag",
+                                             "HTTP 403 sem fallback",
+                                             "opcao explicita por modelo"
+                                         ]
+                          },
+    "HistoricalModelEvidence":  "api-dell-2026-10-28.json"
+}

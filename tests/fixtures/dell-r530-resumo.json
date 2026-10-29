@@ -1,0 +1,215 @@
+﻿{
+    "ProductCode":  "poweredge-r530",
+    "DriverListData":  [
+                           {
+                               "DriverId":  "PVDNH",
+                               "DriverName":  "BIOS versão 2.19.0 dos servidores Dell PowerEdge R430/R530/T430",
+                               "Type":  "BIOS",
+                               "Imp":  "Urgente",
+                               "ImpId":  "1",
+                               "ReleaseDate":  "08 Apr 2024",
+                               "DellVer":  "2.19.0, 2.19.0",
+                               "CatName":  "BIOS",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "BIOS_PVDNH_WN64_2.19.0.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "BIOS_PVDNH_LN64_2.19.0.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "BIOS_PVDNH_EFI_2.19.0.efi",
+                                                        "FileType":  "EFI"
+                                                    },
+                                                    {
+                                                        "FileName":  "R430R530T430_BIOS_2.19.0_RN.pdf",
+                                                        "FileType":  "PDF2"
+                                                    },
+                                                    {
+                                                        "FileName":  "BIOS_PVDNH_LN64_2.19.0.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "NAA"
+                                           ]
+                           },
+                           {
+                               "DriverId":  "VWF72",
+                               "DriverName":  "iDRAC 2.86.86.86",
+                               "Type":  "FRMW",
+                               "Imp":  "Recomendada",
+                               "ImpId":  "2",
+                               "ReleaseDate":  "03 Apr 2024",
+                               "DellVer":  "2.86.86.86, A00",
+                               "CatName":  "iDRAC com Lifecycle Controller",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_VWF72_WN64_2.86.86.86_A00.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_VWF72_LN64_2.86.86.86_A00.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC_2.86.86.86_A00.exe",
+                                                        "FileType":  "SAE"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC_2.86.86.86_ReleaseNotes_A00.pdf",
+                                                        "FileType":  "PDF"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC_2.86.86.86_ReleaseNotes_A00.txt",
+                                                        "FileType":  "RC"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_VWF72_LN64_2.86.86.86_A00.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "NAA"
+                                           ]
+                           },
+                           {
+                               "DriverId":  "89DRR",
+                               "DriverName":  "iDRAC8 2.06.05.05",
+                               "Type":  "FRMW",
+                               "Imp":  "Recomendada",
+                               "ImpId":  "2",
+                               "ReleaseDate":  "28 Nov 2014",
+                               "DellVer":  "2.06.05.05, A00",
+                               "CatName":  "iDRAC com Lifecycle Controller",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_89DRR_WN64_2.06.05.05_A00.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_89DRR_LN_2.06.05.05_A00.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC8__2.06.05.05__A00.exe",
+                                                        "FileType":  "SAE"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC8_2_06_05_05_A00_ReleaseNotes.pdf",
+                                                        "FileType":  "PDF"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_89DRR_WN32_2.06.05.05_A00.EXE",
+                                                        "FileType":  "LWXP"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC8_2_06_05_05_A00_ReleaseNotes.txt",
+                                                        "FileType":  "RC"
+                                                    },
+                                                    {
+                                                        "FileName":  "iDRAC-with-Lifecycle-Controller_Firmware_89DRR_LN_2.06.05.05_A00.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "NAA"
+                                           ]
+                           },
+                           {
+                               "DriverId":  "DFF48",
+                               "DriverName":  "Firmware do dispositivo de rede Broadcom NetXtreme, 22.0",
+                               "Type":  "FRMW",
+                               "Imp":  "Opcional ",
+                               "ImpId":  "3",
+                               "ReleaseDate":  "09 Mar 2022",
+                               "DellVer":  "22.00.6, 22.00.6",
+                               "CatName":  "Rede",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "Network_Firmware_DFF48_WN64_22.00.6.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "Network_Firmware_DFF48_LN64_22.00.6.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "Release_user_NX1.txt",
+                                                        "FileType":  "FET"
+                                                    },
+                                                    {
+                                                        "FileName":  "Network_Firmware_DFF48_LN64_22.00.6.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "WS19L",
+                                               "WS22L",
+                                               "RHE70",
+                                               "NAA",
+                                               "SLE15",
+                                               "RHEL8"
+                                           ]
+                           },
+                           {
+                               "DriverId":  "CN7MV",
+                               "DriverName":  "Broadcom Windows 64bit driver update for NetXtreme Ethernet adapters, 21.4.1",
+                               "Type":  "DRVR",
+                               "Imp":  "Opcional ",
+                               "ImpId":  "3",
+                               "ReleaseDate":  "18 Mar 2019",
+                               "DellVer":  "21.40.2, 214.0.200.0",
+                               "CatName":  "Rede",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "Network_Driver_CN7MV_WN64_21.40.2_214.0.200.0_03.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "Release_user_NX1_v214.0.200.0.txt",
+                                                        "FileType":  "FET"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "W12R2",
+                                               "WS19L",
+                                               "WST14",
+                                               "MWS80"
+                                           ]
+                           },
+                           {
+                               "DriverId":  "700GG",
+                               "DriverName":  "Dell PERC H730/H730P/H830/FD33xS/FD33xD Mini/Adapter RAID Controllers firmware version 25.5.9.0001",
+                               "Type":  "FRMW",
+                               "Imp":  "Recomendada",
+                               "ImpId":  "2",
+                               "ReleaseDate":  "05 Mar 2024",
+                               "DellVer":  "25.5.9.0001, A17",
+                               "CatName":  "RAID SAS",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "SAS-RAID_Firmware_700GG_WN64_25.5.9.0001_A17_01.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "SAS-RAID_Firmware_700GG_LN_25.5.9.0001_A17_01.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "SAS_RAID_Firmware_H730_H730P_H830_RELNOTES_25.5.9.0001_A17.txt",
+                                                        "FileType":  "RC"
+                                                    },
+                                                    {
+                                                        "FileName":  "SAS-RAID_Firmware_700GG_LN_25.5.9.0001_A17_01.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ],
+                               "AppOses":  [
+                                               "NAA"
+                                           ]
+                           }
+                       ]
+}

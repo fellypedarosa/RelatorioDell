@@ -1,0 +1,129 @@
+﻿{
+    "SchemaVersion":  1,
+    "CheckedAt":  "2026-10-28T14:43:10.2858879-03:00",
+    "Purpose":  "Read-only primary-source verification of the Dell website internal downloads interface; no packages downloaded or executed.",
+    "Product":  "poweredge-r530",
+    "OSCode":  "W12R2",
+    "Request":  {
+                    "Method":  "GET",
+                    "URL":  "https://www.dell.com/support/driver/pt-br/dep/api/driverlist/packdriversbyproduct?productcode=poweredge-r530\u0026oscode=W12R2\u0026lob=PowerEdge\u0026initialload=true",
+                    "Headers":  {
+                                    "X-Requested-With":  "XMLHttpRequest",
+                                    "X-Robots-Tag":  "noindex"
+                                },
+                    "LoginUsed":  false,
+                    "APIKeyUsed":  false,
+                    "AuthorizationHeaderUsed":  false,
+                    "ServiceTagSent":  false,
+                    "InstalledInventorySent":  false
+                },
+    "Response":  {
+                     "HTTPStatus":  200,
+                     "ContentType":  "text/plain; charset=utf-8",
+                     "ProductCode":  "poweredge-r530",
+                     "ReleaseCount":  352,
+                     "EntryFields":  [
+                                         "DriverId",
+                                         "DriverName",
+                                         "Type",
+                                         "TypeName",
+                                         "Imp",
+                                         "ImpId",
+                                         "ReleaseDate",
+                                         "IsSecure",
+                                         "IsRestricted",
+                                         "IsRestart",
+                                         "DellVer",
+                                         "BrfDesc",
+                                         "AppOses",
+                                         "AppLanguages",
+                                         "FileFormats",
+                                         "FileFrmtInfo",
+                                         "OthFileFrmts",
+                                         "Cat",
+                                         "CatName",
+                                         "CatIconClass",
+                                         "IsBiosFirmWarningToBeShown",
+                                         "IsOthVerExst",
+                                         "LUPDDate",
+                                         "IsCertDriver",
+                                         "ReleaseDateValue",
+                                         "DeviceNameWithLan",
+                                         "OtherVersions",
+                                         "Predecessor",
+                                         "Successor",
+                                         "OtherVersionImportance",
+                                         "IsImpInfoAvailable",
+                                         "IsTagDriver",
+                                         "DownloadType",
+                                         "AccessLevel",
+                                         "SWVersion",
+                                         "ImportantInfo",
+                                         "FixesandEnhance"
+                                     ],
+                     "Examples":  [
+                                      {
+                                          "DriverId":  "PVDNH",
+                                          "DriverName":  "BIOS versão 2.19.0 dos servidores Dell PowerEdge R430/R530/T430",
+                                          "DellVer":  "2.19.0, 2.19.0",
+                                          "Imp":  "Urgente",
+                                          "ReleaseDate":  "08 Apr 2024"
+                                      },
+                                      {
+                                          "DriverId":  "VWF72",
+                                          "DriverName":  "iDRAC 2.86.86.86",
+                                          "DellVer":  "2.86.86.86, A00",
+                                          "Imp":  "Recomendada",
+                                          "ReleaseDate":  "03 Apr 2024"
+                                      },
+                                      {
+                                          "DriverId":  "700GG",
+                                          "DriverName":  "Dell PERC H730/H730P/H830/FD33xS/FD33xD Mini/Adapter RAID Controllers firmware version 25.5.9.0001",
+                                          "DellVer":  "25.5.9.0001, A17",
+                                          "Imp":  "Recomendada",
+                                          "ReleaseDate":  "05 Mar 2024"
+                                      }
+                                  ]
+                 },
+    "HTMLProvenance":  {
+                           "Method":  "POST",
+                           "URL":  "https://www.dell.com/support/driver/pt-br/dep/driverhome/defaultview",
+                           "RequestBody":  "{\"ProductCode\":\"poweredge-r530\",\"OsCode\":\"W12R2\",\"Lob\":\"PowerEdge\"}",
+                           "HTTPStatus":  200,
+                           "PublishedDriversByProductDataUrl":  "https://www.dell.com/support/driver/pt-br/dep/api/driverlist/packdriversbyproduct",
+                           "PublishedDriversByTagDataUrl":  "https://www.dell.com/support/driver/pt-br/dep/api/driverlist/packdriversbytag",
+                           "PublishedDecryptShift":  3,
+                           "EndpointLiteralFound":  true,
+                           "ScriptReferenceFound":  true
+                       },
+    "JavaScriptSources":  [
+                              {
+                                  "URL":  "https://www.dellcdn.com/support/driver/bundle/dds2/js/v-1-3-617-613/driver-list.min.js",
+                                  "HTTPStatus":  200,
+                                  "Bytes":  119601,
+                                  "SHA256":  "CD06235A2A23A93FAAD362C222FAAD4E72A0A9B66B4919D34D1C3B165F6C601A",
+                                  "Evidence":  "Builds driverListUrl from driversByProductDataUrl with productcode/oscode/lob/initialload and calls ajaxGet, dndDecrypt, JSON.parse."
+                              },
+                              {
+                                  "URL":  "https://www.dellcdn.com/support/driver/bundle/dds2/js/v-1-3-617-613/driversLoader.min.js",
+                                  "HTTPStatus":  200,
+                                  "Bytes":  30539,
+                                  "SHA256":  "3F1E03D168FE5205B52A85FBF58FF55B0CCCC0469BAD07F11208B2C2F727E00F",
+                                  "Evidence":  "Defines dndDecrypt and headers X-Requested-With/XMLHttpRequest and X-Robots-Tag/noindex."
+                              }
+                          ],
+    "EvidenceLimits":  [
+                           "Observed public website interface, not a confirmed published integration contract or SLA.",
+                           "No API price, commercial-use authorization, permanent free-access guarantee or endpoint-specific license was established by this HTTP test.",
+                           "Dell KB000128194 states that server drivers/firmware downloads are free; this is distinct from an integration API license.",
+                           "This endpoint supplies published downloads, not pending updates or installed versions.",
+                           "Hashes identify the JavaScript version checked; they are not a Dell signature or endorsement."
+                       ],
+    "References":  {
+                       "FreeDriverDownloads":  "https://www.dell.com/support/kbdoc/en-us/000128194/updating-firmware-and-drivers-on-dell-emc-poweredge-servers",
+                       "BrazilSiteTerms":  "https://www.dell.com/pt-br/legal/lp/site-terms-of-use-terms-of-use",
+                       "FullEnglishSiteTerms":  "https://www.dell.com/en-us/legal/lp/site-terms-of-use",
+                       "GenericAPITerms":  "https://i.dell.com/sites/csdocuments/Legal_Docs/en/us/api-terms-of-use_en.pdf",
+                       "LatinAmericaPrivacy":  "https://www.dell.com/pt-br/legal/lp/policies-privacy"
+                   }
+}
