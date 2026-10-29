@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<SVMInventory lang="en" schemaVersion="1.0" timestamp="2026-10-29 00:00:00" invcolVersion="26.09.000 (BLD_22)" invcolBuild="22">
+  <OperatingSystem osVendor="Microsoft" osCode="WIN" osArch="x64" majorVersion="10" minorVersion="0" spMajorVersion="0" spMinorVersion="0" />
+  <System systemID="063A" />
+  <Device display="OpenManage | iDRAC Service Module" componentID="101803">
+    <Application display="OpenManage | iDRAC Service Module" version="3.4.0" componentType="APAC" />
+  </Device>
+  <Device display="Broadcom NetXtreme Driver Family" componentID="8641" enum="BComFam">
+    <Application display="Broadcom NetXtreme Driver Family" version="0.0.0" componentType="DRVR" />
+  </Device>
+  <Device display="OpenManage Server Administrator" componentID="2331">
+    <Application display="OpenManage Server Administrator" version="10.3.0.0" componentType="APP" />
+  </Device>
+  <Device display="BIOS" componentID="159">
+    <Application display="BIOS" version="2.5.4" componentType="BIOS" />
+  </Device>
+  <Device display="Power Supply" componentID="101095" enum="PS:0">
+    <Application display="Power Supply" version="00.24.7D" componentType="FRMW" />
+  </Device>
+  <Device display="Power Supply" componentID="101095" enum="PS:1">
+    <Application display="Power Supply" version="00.24.7D" componentType="FRMW" />
+  </Device>
+  <Device display="Chipset INF" componentID="101381">
+    <Application display="Chipset INF" version="0" componentType="DRVR" />
+  </Device>
+  <Device display="13G SEP Firmware" componentID="101434" enum="Bay ID =1">
+    <Application display="13G SEP Firmware, BayID: 1" version="2.25" componentType="FRMW" />
+  </Device>
+  <Device display="MG04SCA20ENY" componentID="105266" enum="CtrlId 0 DeviceId 0" FQDD="Disk.Bay.0:Enclosure.Internal.1:RAID.Integrated.1-1">
+    <Application display="Firmware for  - Disk 0 in Backplane 1 of PERC H730P Mini Controller 0  " version="EG02" componentType="FRMW" />
+  </Device>
+  <Device display="MG04SCA20ENY" componentID="105266" enum="CtrlId 0 DeviceId 1" FQDD="Disk.Bay.1:Enclosure.Internal.1:RAID.Integrated.1-1">
+    <Application display="Firmware for  - Disk 1 in Backplane 1 of PERC H730P Mini Controller 0  " version="EG03" componentType="FRMW" />
+  </Device>
+  <Device display="ST8000NM023B-2TJ" componentID="111175" enum="CtrlId 0 DeviceId 2" FQDD="Disk.Bay.2:Enclosure.Internal.1:RAID.Integrated.1-1">
+    <Application display="Firmware for  - Disk 2 in Backplane 1 of PERC H730P Mini Controller 0  " version="LA0B" componentType="FRMW" />
+  </Device>
+  <Device display="ST8000NM023B-2TJ" componentID="111175" enum="CtrlId 0 DeviceId 3" FQDD="Disk.Bay.3:Enclosure.Internal.1:RAID.Integrated.1-1">
+    <Application display="Firmware for  - Disk 3 in Backplane 1 of PERC H730P Mini Controller 0  " version="LA0B" componentType="FRMW" />
+  </Device>
+  <Device display="PERC H730P Mini Controller 0" function="0" device="0" bus="1" subVendorID="1028" subDeviceID="1F47" deviceID="005D" vendorID="1000">
+    <Application display="PERC H730P Mini Controller 0 Firmware" version="25.5.3.0005" componentType="FRMW" />
+  </Device>
+  <Device display="[0002] Broadcom NetXtreme Gigabit Ethernet #2" function="0" device="0" bus="5" subVendorID="14E4" subDeviceID="2003" deviceID="165F" vendorID="14E4">
+    <Application display="[0002] Broadcom NetXtreme Gigabit Ethernet #2" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="[0001] Broadcom NetXtreme Gigabit Ethernet" function="1" device="0" bus="5" subVendorID="14E4" subDeviceID="2003" deviceID="165F" vendorID="14E4">
+    <Application display="[0001] Broadcom NetXtreme Gigabit Ethernet" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="[0003] Broadcom NetXtreme Gigabit Ethernet #3" function="0" device="0" bus="2" subVendorID="1028" subDeviceID="0639" deviceID="165F" vendorID="14E4">
+    <Application display="[0003] Broadcom NetXtreme Gigabit Ethernet #3" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="[0004] Broadcom NetXtreme Gigabit Ethernet #4" function="1" device="0" bus="2" subVendorID="1028" subDeviceID="0639" deviceID="165F" vendorID="14E4">
+    <Application display="[0004] Broadcom NetXtreme Gigabit Ethernet #4" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="[0005] Broadcom NetXtreme Gigabit Ethernet #5" function="0" device="0" bus="3" subVendorID="1028" subDeviceID="0639" deviceID="165F" vendorID="14E4">
+    <Application display="[0005] Broadcom NetXtreme Gigabit Ethernet #5" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="[0006] Broadcom NetXtreme Gigabit Ethernet #6" function="1" device="0" bus="3" subVendorID="1028" subDeviceID="0639" deviceID="165F" vendorID="14E4">
+    <Application display="[0006] Broadcom NetXtreme Gigabit Ethernet #6" version="20.06.18" componentType="FRMW" />
+  </Device>
+  <Device display="Lifecycle Controller" componentID="28897">
+    <Application display="Lifecycle Controller" version="2.86.86.86" componentType="APAC" />
+  </Device>
+  <Device display="Dell 32 Bit uEFI Diagnostics, version 4239, 4239A36, 4239.44" componentID="25806">
+    <Application display="Dell 32 Bit uEFI Diagnostics, version 4239, 4239A36, 4239.44" version="4239A36" componentType="APAC" />
+  </Device>
+  <Device display="Dell OS Driver Pack, 17.08.10, A00" componentID="18981">
+    <Application display="Dell OS Driver Pack, 17.08.10, A00" version="17.08.10" componentType="APAC" />
+  </Device>
+  <Device display="Integrated Dell Remote Access Controller" componentID="25227">
+    <Application display="Integrated Dell Remote Access Controller" version="2.86.86.86" componentType="FRMW" />
+  </Device>
+  <Device display="OS COLLECTOR 2.1, A00" componentID="101734">
+    <Application display="OS COLLECTOR 2.1, A00" version="2.1" componentType="APAC" />
+  </Device>
+  <Device display="System CPLD" componentID="27763">
+    <Application display="System CPLD" version="1.0.3" componentType="FRMW" />
+  </Device>
+</SVMInventory>

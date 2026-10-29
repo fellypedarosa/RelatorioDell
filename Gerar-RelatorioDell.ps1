@@ -18,7 +18,8 @@ Modelo (padrão): consulta os downloads pelo modelo e pelo Windows Server instal
 ServiceTag é uma opção experimental, sem sucesso online confirmado; a Dell pode
 bloquear esse acesso automatizado com HTTP 403.
 .PARAMETER ArquivoInventario
-Reutiliza um inventário textual já coletado neste servidor, com Exiting DSU! ao final.
+Reutiliza um inventário XML SVMInventory ou texto do DSU deste mesmo servidor.
+O texto precisa conter Exiting DSU!; o XML precisa estar completo e válido.
 Válido para Fonte Site; evita repetir uma consulta demorada do DSU.
 .PARAMETER ArquivoSiteDell
 Importa os downloads de um arquivo .har exportado manualmente do Edge ou Chrome.
@@ -819,6 +820,128 @@ function Read-SharedText {
     try { return $leitor.ReadToEnd() } finally { $leitor.Dispose(); $stream.Dispose() }
 }
 
+function ConvertFrom-DsuInventoryXml {
+    param([string]$Texto)
+    # SVMInventory observado no coletor Dell. Não resolve DTDs ou entidades externas.
+    $config = New-Object Xml.XmlReaderSettings
+    $config.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $config.XmlResolver = $null
+    $config.MaxCharactersInDocument = 10MB
+    $origem = New-Object IO.StringReader($Texto)
+    $leitor = [Xml.XmlReader]::Create($origem, $config)
+    try {
+        $xml = New-Object Xml.XmlDocument
+        $xml.XmlResolver = $null
+        $xml.Load($leitor)
+    }
+    finally { $leitor.Dispose(); $origem.Dispose() }
+    $raiz = $xml.DocumentElement
+    if ($null -eq $raiz -or $raiz.Name -cne 'SVMInventory' -or $raiz.NamespaceURI -or $raiz.GetAttribute('schemaVersion') -ne '1.0') {
+        throw 'XML de inventário não reconhecido. Esperado SVMInventory schemaVersion=1.0; não use um catálogo ou relatório JSON.'
+    }
+    $dispositivos = @($raiz.SelectNodes('Device'))
+    if ($dispositivos.Count -eq 0) { throw 'XML de inventário sem dispositivos. A coleta não pode ser considerada concluída.' }
+    foreach ($dispositivo in $dispositivos) {
+        $aplicacoes = @($dispositivo.SelectNodes('Application'))
+        if ($aplicacoes.Count -eq 0) { throw 'XML de inventário contém dispositivo sem Application; coleta incompleta ou schema diferente.' }
+        foreach ($aplicacao in $aplicacoes) {
+            foreach ($atributo in @('display', 'version', 'componentType')) {
+                if ([string]::IsNullOrWhiteSpace($aplicacao.GetAttribute($atributo))) { throw "XML de inventário contém Application sem $atributo." }
+            }
+            # Preserva cada instância, inclusive discos iguais em baias diferentes.
+            [pscustomobject]@{
+                Nome = $aplicacao.GetAttribute('display').Trim()
+                Tipo = $aplicacao.GetAttribute('componentType').Trim()
+                Versao = $aplicacao.GetAttribute('version').Trim()
+                ModeloDispositivo = $dispositivo.GetAttribute('display').Trim()
+                ComponentID = $dispositivo.GetAttribute('componentID').Trim()
+                FQDD = $dispositivo.GetAttribute('FQDD').Trim()
+                VendorID = $dispositivo.GetAttribute('vendorID').Trim()
+                DeviceID = $dispositivo.GetAttribute('deviceID').Trim()
+                SubVendorID = $dispositivo.GetAttribute('subVendorID').Trim()
+                SubDeviceID = $dispositivo.GetAttribute('subDeviceID').Trim()
+                Bus = $dispositivo.GetAttribute('bus').Trim()
+                Device = $dispositivo.GetAttribute('device').Trim()
+                Function = $dispositivo.GetAttribute('function').Trim()
+                Enumerador = $dispositivo.GetAttribute('enum').Trim()
+            }
+        }
+    }
+}
+
+function Import-DsuInventory {
+    param([string]$Arquivo, [string]$Pasta)
+    # Obtém uma cópia estável; StreamReader reconhece BOM UTF-16 do XML Dell.
+    $stream = [IO.File]::Open($Arquivo, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -gt 10MB) { throw 'Inventário excede o limite de 10 MiB.' }
+        $leitor = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+        try { $texto = $leitor.ReadToEnd() } finally { $leitor.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    $ehXml = ([IO.Path]::GetExtension($Arquivo) -ieq '.xml' -or $texto.TrimStart().StartsWith('<'))
+    if ($ehXml) { $lista = @(ConvertFrom-DsuInventoryXml -Texto $texto); $extensao = 'xml' }
+    else { $lista = @(Get-ValidatedInventory -Texto $texto -ExigirEncerramento); $extensao = 'txt' }
+    if ($Pasta) {
+        # Salva um snapshot com declaração coerente; nunca altera o arquivo recebido.
+        $snapshot = $texto
+        if ($ehXml) { $snapshot = $snapshot -replace '(?i)encoding\s*=\s*["'']UTF-16["'']', 'encoding="UTF-8"' }
+        [IO.File]::WriteAllText((Join-Path $Pasta "inventory.importado.$extensao"), $snapshot, (New-Object Text.UTF8Encoding($true)))
+    }
+    Write-Log "Inventário $extensao validado: $($lista.Count) componentes."
+    return $lista
+}
+
+function Get-SiteInventoryArguments {
+    param([string]$Ajuda, [string]$ArquivoXml)
+    if ($Ajuda -notmatch '(?im)(?<![\w-])--inventory(?=[\s=,\[\]<>;:]|$)') { throw 'A ajuda do DSU não confirmou --inventory. Consulte help.stdout.txt.' }
+    if ($Ajuda -match '(?im)(?<![\w-])--output-inventory-xml(?=[\s=,\[\]<>;:]|$)') {
+        return @('--inventory', ('--output-inventory-xml=' + $ArquivoXml))
+    }
+    Write-Log 'Esta versão do DSU não anuncia --output-inventory-xml; usando texto, com menor identificação de hardware.' 'AVISO'
+    return @('--inventory')
+}
+
+function Get-DellDiskRule {
+    param($Instalado)
+    # Regras locais restritas à identidade observada e ao pacote Dell verificado.
+    # O DSU pode truncar o modelo Seagate em 18 caracteres: CID e FQDD são exigidos.
+    if ($Instalado.Tipo -ne 'FRMW' -or ([string](Get-ObjectValue $Instalado 'FQDD')) -notmatch '^Disk\.Bay\.\d+:') { return $null }
+    $modeloDisco = [string](Get-ObjectValue $Instalado 'ModeloDispositivo')
+    $cid = [string](Get-ObjectValue $Instalado 'ComponentID')
+    if ($cid -eq '105266' -and $modeloDisco -eq 'MG04SCA20ENY') {
+        return [pscustomobject]@{ DriverId='RG9MK'; ModeloTitulo='MG04SCA20ENY'; VersaoAlvo='EG03'; Anteriores=@('EG02') }
+    }
+    if ($cid -eq '111175' -and $modeloDisco -in @('ST8000NM023B-2TJ', 'ST8000NM023B-2TJ133')) {
+        return [pscustomobject]@{ DriverId='P183W'; ModeloTitulo='ST8000NM023B'; VersaoAlvo='LA0C'; Anteriores=@('LA0B') }
+    }
+    return $null
+}
+
+function Get-DsuSiteInventory {
+    param([string]$Executavel, [string]$Ajuda, [string]$Pasta, [int]$LimiteMinutos)
+    $arquivoXml = Join-Path $Pasta 'inventory.xml'
+    $argumentos = @(Get-SiteInventoryArguments -Ajuda $Ajuda -ArquivoXml $arquivoXml)
+    $bruto = Invoke-DsuReadOnly $Executavel $argumentos 'inventory' $LimiteMinutos
+    if ($bruto.ExitCode -ne 0) { throw "Inventário DSU falhou (código $($bruto.ExitCode)). Consulte os arquivos brutos." }
+    if ($argumentos.Count -gt 1) {
+        # Se o DSU prometeu XML, ausência ou corrupção são erro, sem fallback.
+        $lista = @(Import-DsuInventory -Arquivo $arquivoXml)
+        if ($bruto.Text -match '(?im)^\s*(?:ERROR\b|FATAL\b|Failed\b|Unable\b|Could\s+not\b)') { throw 'DSU retornou mensagem de falha durante a coleta XML; consulte inventory.stdout.txt.' }
+        return $lista
+    }
+    return Get-ValidatedInventory -Texto $bruto.Text
+}
+
+function Compare-DellDiskVersion {
+    param($Regra, [string]$Instalada, [string]$Disponivel)
+    # Não ordena firmware alfanumérico. Só reconhece pares explícitos da regra.
+    if ($null -eq $Regra -or $Disponivel -cne $Regra.VersaoAlvo) { return $null }
+    if ($Instalada -ceq $Regra.VersaoAlvo) { return 0 }
+    if ($Instalada -cin $Regra.Anteriores) { return -1 }
+    return $null
+}
+
 function Compare-DottedVersion {
     param([string]$Instalada, [string]$Disponivel)
     # Retorna null para versões alfanuméricas, zeros ou formatos não comparáveis.
@@ -870,6 +993,11 @@ function New-SiteAssessmentRows {
             VersaoNova = ''; Criticidade = ''; DataDeLancamento = ''; NomeDoPacote = ''
             Status = 'Inconclusivo'; Motivo = ''; URL = ''
         }
+        # Só o CSV de verificação recebe estes campos; o principal mantém 10 colunas.
+        foreach ($campo in @('ModeloDispositivo','ComponentID','FQDD','VendorID','DeviceID','SubVendorID','SubDeviceID','Bus','Device','Function','Enumerador')) {
+            $resultado | Add-Member -NotePropertyName $campo -NotePropertyValue ([string](Get-ObjectValue $instalado $campo))
+        }
+        $regraDisco = Get-DellDiskRule -Instalado $instalado
         $candidatos = @()
         if ($instalado.Tipo -notin @('BIOS', 'FRMW', 'DRVR')) {
             $resultado.Motivo = 'Tipo de componente ausente ou desconhecido no inventário; registro preservado para revisão.'
@@ -892,8 +1020,12 @@ function New-SiteAssessmentRows {
         elseif ($instalado.Tipo -eq 'FRMW' -and $instalado.Nome -match '(?i)^System CPLD$') {
             $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverName -match '(?i)\bCPLD\b' })
         }
+        elseif ($null -ne $regraDisco) {
+            $modeloTitulo = '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($regraDisco.ModeloTitulo) + '(?![A-Za-z0-9])'
+            $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverId -eq $regraDisco.DriverId -and $_.DriverName -match $modeloTitulo })
+        }
         else {
-            $resultado.Motivo = 'O inventário textual não permite confirmar o modelo e a correspondência da versão instalada com a versão do pacote do site.'
+            $resultado.Motivo = 'Não há regra validada para associar a identidade deste dispositivo e sua versão ao pacote Dell. Consulte os identificadores no CSV de verificação; ausência de regra não significa ausência de atualização.'
             if ($instalado.Versao -match '^0+(?:\.0+)*$') { $resultado.Motivo = 'DSU informou versão zero; não é uma versão instalada válida para comparação.' }
             $resultado
             continue
@@ -924,11 +1056,16 @@ function New-SiteAssessmentRows {
         $resultado.DataDeLancamento = $ultimaData.ToString('yyyy-MM-dd')
         $resultado.NomeDoPacote = [string](Get-ObjectValue $arquivo 'FileName')
         $resultado.URL = 'https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid=' + $pacote.DriverId
-        $comparacao = Compare-DottedVersion -Instalada $instalado.Versao -Disponivel $nova
+        if ($null -ne $regraDisco) { $comparacao = Compare-DellDiskVersion -Regra $regraDisco -Instalada $instalado.Versao -Disponivel $nova }
+        else { $comparacao = Compare-DottedVersion -Instalada $instalado.Versao -Disponivel $nova }
         if ($null -eq $comparacao) { $resultado.Motivo = 'Versões alfanuméricas, zero ou formatos não comparáveis automaticamente.' }
         elseif ($comparacao -lt 0) { $resultado.Status = 'Pendente'; $resultado.Motivo = 'Componente identificado; versão instalada inferior à versão publicada na referência consultada.' }
         elseif ($comparacao -eq 0) { $resultado.Status = 'Atualizado na referência'; $resultado.Motivo = 'A versão instalada coincide com a versão publicada na referência consultada.' }
         else { $resultado.Status = 'Acima da referência'; $resultado.Motivo = 'A versão instalada é superior à referência consultada; não sugerir downgrade.' }
+        if ($null -ne $regraDisco) {
+            if ($null -eq $comparacao) { $resultado.Motivo = 'Disco associado, mas o par de versões não consta na regra validada; não é usada ordem alfabética para firmware.' }
+            else { $resultado.Motivo += ' Regra local por modelo, ComponentID, FQDD, DriverId e par de versões explícito; validar aplicabilidade e pré-requisitos do DUP antes de instalar.' }
+        }
         $resultado
     }
 }
@@ -1019,20 +1156,17 @@ try {
         $dadosSite = Get-DellSiteReference -ArquivoSiteDell $ArquivoSiteDell -Produto $produto -SO $so -Pasta $script:Diagnostico -ServiceTag $serviceTag -Consulta $ConsultaSite
         if ($ArquivoInventario) {
             $caminhoInventario = (Get-Item -LiteralPath $ArquivoInventario -ErrorAction Stop).FullName
-            $textoInventario = Read-SharedText -Arquivo $caminhoInventario
-            $inventario = @(Get-ValidatedInventory -Texto $textoInventario -ExigirEncerramento)
-            [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'inventory.importado.txt'), $textoInventario, (New-Object Text.UTF8Encoding($true)))
+            $inventario = @(Import-DsuInventory -Arquivo $caminhoInventario -Pasta $script:Diagnostico)
             Write-Log "Usando inventário já coletado: $caminhoInventario; modificado em $((Get-Item -LiteralPath $caminhoInventario).LastWriteTime.ToString('o'))."
-            Write-Log 'O arquivo importado deve pertencer a este servidor. O texto do DSU não permite comprovar a identidade da máquina de origem.' 'AVISO'
+            Write-Log 'O arquivo importado deve pertencer a este servidor. A importação de texto/XML não comprova a identidade nem a atualidade da máquina de origem.' 'AVISO'
         }
         else {
             $dsu = Find-DsuExecutable $CaminhoDSU
             $ajuda = Invoke-DsuReadOnly $dsu @('--help') 'help' 1
-            if ($ajuda.ExitCode -ne 0 -or $ajuda.Text -notmatch '(?im)(?<![\w-])--inventory(?=[\s=,\[\]<>;:]|$)') { throw 'A ajuda do DSU não confirmou a opção --inventory. Consulte help.stdout.txt.' }
-            $inventarioBruto = Invoke-DsuReadOnly $dsu @('--inventory') 'inventory' $TempoLimiteDSUMinutos
-            if ($inventarioBruto.ExitCode -ne 0) { throw "Inventário DSU falhou (código $($inventarioBruto.ExitCode)). Consulte os arquivos brutos." }
-            $inventario = @(Get-ValidatedInventory -Texto $inventarioBruto.Text)
+            if ($ajuda.ExitCode -ne 0) { throw "Ajuda do DSU falhou (código $($ajuda.ExitCode))." }
+            $inventario = @(Get-DsuSiteInventory -Executavel $dsu -Ajuda $ajuda.Text -Pasta $script:Diagnostico -LimiteMinutos $TempoLimiteDSUMinutos)
         }
+        [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'inventory.normalizado.json'), (ConvertTo-Json -InputObject @($inventario) -Depth 5), (New-Object Text.UTF8Encoding($true)))
         Write-Log "Inventário interpretado: $($inventario.Count) componentes. Comparando com os downloads do site."
         $verificacoes = @(New-SiteAssessmentRows -Inventario $inventario -Downloads $dadosSite.DriverListData -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo -SO $so)
         $csv = Join-Path $CaminhoSaida ($prefixo + '.csv')

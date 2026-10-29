@@ -27,6 +27,16 @@ A proveniência da consulta, URLs e hashes dos JavaScripts examinados estão em 
 
 Alterações na resposta online não devem mudar silenciosamente estes fixtures. Para atualizá-los, registre uma nova coleta, preserve a origem e confira se as expectativas dos testes continuam corretas.
 
+## Inventario-R530.xml e dell-r530-discos.json
+
+Adicionados em 29/10/2026. O XML deriva do inventário real fornecido pelo operador, com `schemaVersion=1.0` e Inventory Collector `26.09.000 (BLD_22)`. Preserva as 25 aplicações, nomes, versões, modelos, ComponentIDs, FQDDs e PCI IDs; não contém Service Tag, hostname, serial de disco ou endereço de rede. O timestamp foi substituído por meia-noite. Foi convertido de UTF-16 para UTF-8; o teste reconstrói UTF-16 com BOM para verificar a leitura original. Não permite deduzir a versão do executável DSU usado na coleta.
+
+O JSON contém somente os dois pacotes RG9MK e P183W, extraídos dos downloads normalizados da captura R530/Windows Server 2016 (`WST14`, 323 registros) de 29/10/2026. Preserva identidade, título, versão, criticidade, data, categoria e arquivos. Não altera o fixture anterior de seis registros (`W12R2`). As páginas oficiais conferidas são [Toshiba RG9MK / EG03](https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=rg9mk) e [Seagate P183W / LA0C](https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=p183w).
+
+O coletor registra o Seagate como `ST8000NM023B-2TJ`, abreviação do modelo completo `ST8000NM023B-2TJ133` na página Dell. O código aceita apenas esses dois textos exatos, junto com ComponentID `111175` e FQDD de disco. Para Toshiba, exige `MG04SCA20ENY`, ComponentID `105266` e FQDD de disco. Esses IDs foram observados no XML; não são um contrato de associação publicado pela API.
+
+A regressão XML usa os seis registros anteriores mais os dois discos: mantém 19 itens em escopo e resulta em cinco pendências, dois atualizados na referência e 12 inconclusivos. Os pares EG02/EG03 e LA0B/LA0C são regras locais explícitas, sem ordenação alfabética. Isso testa a associação implementada, sem executar DUPs ou certificar aplicabilidade. Os originais XML/HAR e relatórios do cliente não são versionados.
+
 ## Casos por Service Tag
 
 Os campos `IsTag`, `ServiceTag`, `IsNoDriversFoundForTag` e `IsTagDriver` usados nos novos testes são **sintéticos**, acrescentados em memória pelo harness. A tag `ABC1234` e o identificador `0-TOKEN_SINTETICO_1234567890` são exemplos fictícios. Não representam uma consulta real por tag nem uma contagem validada online.

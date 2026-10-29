@@ -26,7 +26,7 @@ O modelo é identificado automaticamente e validado na resposta. Exemplos:
 
 Os detalhes técnicos, as regras de comparação e suas limitações estão nas seções seguintes. A [pesquisa de alternativas para consulta por Service Tag](docs/Pesquisa-ServiceTag.md) avalia coleta no navegador, APIs, ferramentas Dell e uma proposta de validação, sem presumir que o bloqueio HTTP tenha sido resolvido.
 
-**Alcance atual:** no modo padrão, as regras de comparação identificam BIOS, iDRAC, firmware de controladoras PERC com modelo reconhecido e CPLD quando há referência inequívoca. Outros componentes são registrados como **inconclusivos**. O resultado é um relatório auxiliar; não certifica que todos os componentes do servidor estejam atualizados.
+**Alcance atual:** no modo padrão, as regras de comparação identificam BIOS, iDRAC, firmware de controladoras PERC com modelo reconhecido e CPLD quando há referência inequívoca. Com inventário XML, também há regras específicas para os discos Toshiba MG04SCA20ENY e Seagate ST8000NM023B descritos abaixo. Outros componentes são registrados como **inconclusivos**. O resultado é um relatório auxiliar; não certifica que todos os componentes do servidor estejam atualizados.
 
 Este é um script próprio. As fontes de downloads e os comandos do DSU são da Dell; as regras de associação e comparação deste projeto não são uma engine de aplicabilidade fornecida ou certificada pela Dell.
 
@@ -50,13 +50,25 @@ Para escolher uma pasta local ou UNC:
 .\Gerar-RelatorioDell.ps1 -CaminhoSaida '\\ARQUIVOS\Relatorios\ClienteA'
 ```
 
-Para reaproveitar um inventário já coletado **neste mesmo servidor**:
+Para reaproveitar o XML já coletado **neste mesmo servidor**, inclusive junto com os downloads do HAR:
 
 ```powershell
-.\Gerar-RelatorioDell.ps1 -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+.\Gerar-RelatorioDell.ps1 -ArquivoInventario '.\InventarioDell.xml'
+
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml'
 ```
 
-O arquivo importado precisa conter a mensagem `Exiting DSU!`. A validação atual verifica a presença dessa mensagem e a interpretação das linhas numeradas; não comprova a identidade da máquina nem a atualidade da coleta. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
+**Prefira XML:** ele preserva modelos de discos físicos atrás da PERC, baias/FQDD, Component IDs e PCI IDs que podem não aparecer no resumo textual. O parâmetro detecta XML `SVMInventory` com `schemaVersion="1.0"` e continua aceitando o texto antigo. O XML precisa estar completo, com dispositivos e suas aplicações/versões; não exige `Exiting DSU!`. O texto importado continua exigindo essa mensagem e linhas numeradas reconhecidas. Arquivos acima de 10 MiB, XML inválido ou com DTD são recusados.
+
+A importação **não comprova a identidade da máquina nem a atualidade da coleta**: use somente inventário deste servidor. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
+
+Sem `-ArquivoInventario`, a coleta prefere automaticamente o XML quando a ajuda do DSU anuncia a opção. Para gerar um XML separadamente, confira primeiro `DSU.exe --help` e execute o comando de inventário:
+
+```powershell
+& 'C:\Program Files\Dell\DELL EMC System Update\DSU.exe' --inventory "--output-inventory-xml=$env:TEMP\InventarioDell.xml"
+```
+
+A Dell documenta essa exportação no [manual do DSU 1.9.2.0][xml-dsu]. O formato aceito foi conferido também no XML real fornecido em 29/10/2026. Não é necessário atualizar o DSU apenas para tentar essa opção; confira a compatibilidade de qualquer nova versão com o Windows Server e o PowerEdge antes de instalá-la.
 
 ### Alternativa manual: downloads salvos do navegador
 
@@ -69,7 +81,7 @@ Exporte o HAR conforme o [guia de captura](docs/Importacao-Manual-Dell.md), copi
 Para reutilizar também o inventário já concluído deste servidor:
 
 ```powershell
-.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.xml"
 ```
 
 O script identifica produto e SO da captura, confere sua correspondência com o servidor e lê os metadados dos downloads. O modo padrão continua sendo **Modelo**: usa a lista ampla do modelo, mesmo se a resposta tiver sido obtida por um endpoint de tag. Abrir uma página pela tag não comprova que todos os registros listados sejam aplicáveis ao hardware atual. Na imagem usada como referência, a aba **All PowerEdge R530** indica a lista ampla; o Windows Server 2012 R2 selecionado ali deve ser trocado se o servidor executar Windows Server 2016.
@@ -90,7 +102,7 @@ flowchart TD
     J --> E{Inventario informado?}
     K --> E
     E -->|Sim| F[Ler e validar arquivo existente]
-    E -->|Nao| G[Consultar ajuda e executar DSU --inventory]
+    E -->|Nao| G[Consultar ajuda e coletar XML com DSU --inventory]
     F --> H[Aplicar regras locais de associacao e comparar versoes]
     G --> H
     H --> I[Gerar CSV principal, CSV de verificacao e log]
@@ -104,7 +116,8 @@ flowchart TD
 | Service Tag | `Win32_BIOS.SerialNumber`, por CIM local |
 | Modelo | `Win32_ComputerSystem.Model`, por CIM local |
 | Windows Server instalado | `Win32_OperatingSystem.Caption` e `ProductType` |
-| Componentes e versões instaladas | Texto de `DSU.exe --inventory`, ou arquivo importado |
+| Componentes e versões instaladas | XML de `DSU.exe --inventory --output-inventory-xml=...`, se anunciado na ajuda; texto em versões sem essa opção; ou arquivo importado |
+| Modelo físico, baia e identificadores de hardware | Atributos de `Device` no XML DSU, associados a cada `Application`; ausentes quando não fornecidos pelo coletor/texto |
 | Versões publicadas, criticidade, data e pacote | Interface interna de Drivers & Downloads no site Dell, consultada por HTTP ou lida da resposta salva no HAR |
 
 **A consulta padrão ao site usa modelo + sistema operacional**, identificados localmente. O script chama `packdriversbyproduct` e compara os downloads recebidos com o inventário atual. A Service Tag, lida de `Win32_BIOS.SerialNumber`, é incluída no relatório e no log, mas não é enviada nessa consulta.
@@ -119,7 +132,9 @@ No modo automático experimental por tag, o fluxo exige confirmação `IsTag = t
 
 Na importação manual com `-ConsultaSite ServiceTag`, a identidade exigida é a **Service Tag em texto claro na resposta, igual à lida do BIOS**. Apenas um identificador opaco na URL ou na resposta não comprova essa correspondência. Se a captura não trouxer essa identidade ou os dados marcados para tag, a importação estrita falha; é possível escolher explicitamente `-ConsultaSite Modelo` para usar a referência ampla, sem alegar validação por tag.
 
-Sem arquivo importado, o script localiza o DSU, executa `--help`, confere a opção `--inventory` e coleta o inventário. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. A Dell documenta o [inventário do DSU e a exportação de informações][inventario-dsu].
+Sem arquivo importado, o script localiza o DSU, executa `--help` e confere `--inventory`. Se a ajuda anunciar `--output-inventory-xml`, executa **as duas opções juntas** e lê o XML após o término com código zero. Se a ajuda não anunciar exportação XML, registra um aviso e usa o texto, com menor identificação de hardware. Quando o XML foi solicitado, ausência, truncamento ou erro da coleta interrompem o relatório: não há fallback textual para esconder a falha. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. Consulte o [inventário][inventario-dsu] e a [exportação XML][xml-dsu] documentados pela Dell.
+
+No XML, `Application.display`, `version` e `componentType` informam nome, versão e tipo. `Device.display` pode conter o modelo físico que faltava no texto. São preservados `componentID`, `FQDD`, os quatro PCI IDs, endereço bus/device/function e `enum`, quando presentes. Discos e interfaces iguais continuam sendo instâncias separadas. IDs coletados não são, por si só, prova de correspondência com um pacote do site.
 
 ### Associação dos componentes
 
@@ -131,9 +146,21 @@ O tipo informado pelo DSU separa `BIOS`, `FRMW` e `DRVR`. Aplicativos `APAC`, `A
 | iDRAC | Reconhece o nome do controlador no inventário e procura firmware cujo título comece com `iDRAC`. |
 | PERC | Extrai o modelo de um nome que comece com `PERC` ou `Dell PERC` e exige esse modelo como um token completo no título do firmware. `H730` não equivale a `H730P`. |
 | CPLD | Para `System CPLD`, procura firmware com `CPLD` no título. |
-| NICs, discos, fontes e demais drivers/firmwares | Ficam inconclusivos quando não há regra específica para associar dispositivo e versão. |
+| Discos com regra XML | Exige firmware, FQDD de disco em baia, modelo e ComponentID específicos. Confere também DriverId e modelo no título do pacote. Aceita somente os pares de versões explicitados abaixo. |
+| NICs, outros discos, fontes e demais drivers/firmwares | Continuam inconclusivos quando não há regra específica para associar identidade e versão. Mesmo com PCI/Component IDs presentes, o código não presume correspondência com a versão de um pacote que atende vários dispositivos. |
 
-Essas associações usam **tipo e textos de identificação/família**. O script não cruza PCI IDs ou Component IDs, não executa a verificação de compatibilidade do DUP e não comprova todas as pré-condições de instalação. Uma pendência identificada aqui deve ser validada na página do pacote antes de uma eventual atualização. A Dell distingue os métodos de descoberta automática dos downloads manuais por componente em seu [guia de atualização PowerEdge][metodos-dell].
+BIOS/iDRAC/PERC/CPLD usam **tipo e textos de identificação/família**; as regras de disco usam também ComponentID e FQDD. Os PCI IDs são expostos para auditoria, sem regra automática de NIC implementada. O script não executa a verificação de compatibilidade do DUP e não comprova todas as pré-condições de instalação. Uma pendência identificada aqui deve ser validada na página do pacote antes de uma eventual atualização. A Dell distingue descoberta automática e downloads manuais em seu [guia de atualização PowerEdge][metodos-dell].
+
+#### Discos: regras restritas, sem ordenação alfabética
+
+| Identidade exigida no XML | Pacote presente na referência consultada | Pares aceitos pela regra local |
+| --- | --- | --- |
+| `MG04SCA20ENY`, ComponentID `105266`, FQDD `Disk.Bay...` | [Toshiba RG9MK / EG03][toshiba-eg03], título contendo o modelo | `EG02 → EG03`: pendente; `EG03 = EG03`: atualizado na referência |
+| `ST8000NM023B-2TJ` ou `ST8000NM023B-2TJ133`, ComponentID `111175`, FQDD `Disk.Bay...` | [Seagate P183W / LA0C][seagate-la0c], título contendo `ST8000NM023B` | `LA0B → LA0C`: pendente; `LA0C = LA0C`: atualizado na referência |
+
+A página Dell RG9MK identifica os modelos Toshiba e a versão EG03; a P183W identifica o modelo completo Seagate `ST8000NM023B-2TJ133` e a versão LA0C. O XML observado abrevia esse modelo para `ST8000NM023B-2TJ`; a regra aceita **essa abreviação exata junto com o ComponentID observado**, sem aceitar qualquer sufixo. Ambos os pacotes estão na captura R530/Windows Server 2016 analisada e têm DUP Windows.
+
+Essas regras são uma **inferência local documentada** entre a identidade/versão observada e a referência publicada, não uma autorização de atualização ou uma matriz de transições certificada pela Dell. As páginas não comprovam todas as condições do servidor, RAID ou disco. ComponentIDs vieram do XML observado, não de um contrato da API. Outro modelo, CID, pacote ou par de versões fica inconclusivo. Por exemplo, `EG04` instalado ou publicado não é ordenado contra `EG03`; exige ampliar a regra com evidência e teste. A referência continua vindo do HAR/site: pacote ausente na consulta não gera pendência.
 
 ### Escolha da referência e comparação
 
@@ -144,7 +171,7 @@ Para cada componente com regra de associação, o código:
 3. Se houver versões diferentes empatadas na data mais recente, ou se nenhuma data válida puder ser selecionada, registra inconclusivo.
 4. Usa a parte de `DellVer` **antes da primeira vírgula** como versão de referência.
 5. Compara os segmentos numéricos. Por exemplo, `2.19.0` é superior a `2.5.4`; `2.19.0.0` equivale a `2.19.0`.
-6. Registra versões zero, alfanuméricas ou não comparáveis como inconclusivas. Não sugere downgrade quando a instalada é superior à referência.
+6. Registra versões zero ou não comparáveis como inconclusivas. Firmware alfanumérico só é comparado nos pares explícitos das regras de disco acima. Não sugere downgrade quando a comparação numérica indica instalada superior.
 
 A criticidade vem do texto **`Imp`** e é normalizada para `Urgente`, `Recomendado` ou `Opcional`. Não depende do código numérico `ImpId`. O SO participa do filtro enviado à API; o código atual não revalida localmente a lista `AppOses` de cada pacote.
 
@@ -251,7 +278,7 @@ Hostname;ServiceTag;Modelo;Componente;Categoria;VersaoAtual;VersaoNova;Criticida
 
 Contém as pendências identificadas, ordenadas por **Urgente → Recomendado → Opcional**. Se houver componentes inconclusivos, acrescenta uma linha de aviso de **verificação parcial**, inclusive quando nenhuma pendência tiver sido identificada.
 
-O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo` e `URL` às dez colunas. Ele é o arquivo adequado para revisar as associações:
+O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo`, `URL`, `ModeloDispositivo`, `ComponentID`, `FQDD`, `VendorID`, `DeviceID`, `SubVendorID`, `SubDeviceID`, `Bus`, `Device`, `Function` e `Enumerador` às dez colunas. Identificadores ficam vazios quando não fornecidos pelo inventário. Ele permite revisar as associações e localizar a baia de cada disco:
 
 | Status | Interpretação dentro das regras atuais |
 | --- | --- |
@@ -284,7 +311,7 @@ No modo manual, o diagnóstico preserva os downloads normalizados utilizados e o
 | `-ConsultaSite` | `Modelo` (padrão): lista ampla para modelo + Windows instalado. `ServiceTag` exige dados por tag; com HAR, exige ainda a tag clara correspondente ao BIOS. A consulta HTTP por tag segue experimental e bloqueada nos testes online. Só se aplica a `-Fonte Site`. |
 | `-CaminhoSaida` | Subpasta `Relatorios` junto do script; aceita pasta local ou UNC. |
 | `-CaminhoDSU` | Descoberta de `dsu.exe` no PATH e em pastas Dell conhecidas. Permite caminho completo explícito. |
-| `-ArquivoInventario` | Reutiliza um texto do DSU do mesmo servidor. Somente com `-Fonte Site`. |
+| `-ArquivoInventario` | Reutiliza XML `SVMInventory` ou texto do DSU do mesmo servidor. Prefira XML para obter identificação física. Somente com `-Fonte Site`. |
 | `-ArquivoSiteDell` | Caminho local ou UNC de um HAR sanitizado exportado do Edge/Chrome, com a resposta de downloads. Substitui a consulta HTTP; somente com `-Fonte Site`. Incompatível com `-Catalogo` e `-Fonte Catalogo`. |
 | `-CodigoProduto` | Derivado do modelo. Permite informar um código conferido na URL Dell, como `poweredge-r530`. |
 | `-CodigoSO` | Derivado do Windows instalado. Permite informar um código conferido no site. |
@@ -323,6 +350,9 @@ Para ajustar uma diferença de formato entre versões, revise os arquivos brutos
 | `Get-DellSiteReference` / `Import-DellSiteHar` | Seleção entre consulta online e leitura local de HAR; validação de modelo, SO, respostas e metadados de captura. |
 | `Get-DellHarRequestContext` / `ConvertTo-DellHarReference` | Identificação das requisições Dell e preservação apenas dos campos usados na comparação. |
 | `ConvertFrom-DsuInventoryText` / `Get-ValidatedInventory` | Leitura de `N. [TIPO, ]Componente ( Version : versão )` e conferência das linhas. |
+| `Import-DsuInventory` / `ConvertFrom-DsuInventoryXml` | Importação XML/texto, BOM UTF-16/UTF-8, schema, instâncias e identificadores. |
+| `Get-SiteInventoryArguments` / `Get-DsuSiteInventory` | Verificação da ajuda e coleta automática XML; erro se o arquivo solicitado estiver ausente/inválido. |
+| `Get-DellDiskRule` / `Compare-DellDiskVersion` | Identidade/pacote e pares alfanuméricos explícitos, sem ordenação genérica. |
 | `New-SiteAssessmentRows` | Regras locais de associação. É o ponto para ampliar cobertura com evidência e testes. |
 | `Compare-DottedVersion` | Comparação de segmentos numéricos. |
 | `Export-SiteAssessment` | CSV principal, aviso de cobertura parcial e CSV de verificação. |
@@ -364,7 +394,9 @@ tests/
   fixtures/
     README.md                       # origem e transformação das amostras
     Inventario-R530.txt              # amostra de inventário sem identificadores do servidor
+    Inventario-R530.xml              # identidades físicas e versões, sem identidade de cliente
     dell-r530-resumo.json            # seis registros reais, reduzidos para os testes
+    dell-r530-discos.json            # dois pacotes de disco da captura de 29/10/2026
 ```
 
 As pastas `backup_antes_API_...` e `Exemplos` eram cópias de segurança/relatórios gerados na preparação e foram retiradas da árvore do projeto. Não são dependências. `tests` é mantida para permitir que outros analistas reproduzam a validação. Os relatórios reais gerados em operação não devem integrar os arquivos fonte do projeto.
@@ -375,7 +407,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **80 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **98 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -408,9 +440,28 @@ Uma captura anterior, também válida, continha 352 downloads para **Windows Ser
 
 Esse teste comprova o fluxo **HAR manual + inventário local + comparação por modelo/SO** nesse servidor. Não comprova filtragem pela Service Tag nem ausência de pendências nos 16 componentes inconclusivos. HAR, hostname, tag e relatórios operacionais não integram o repositório.
 
+### Reprocessamento com inventário XML em 29/10/2026
+
+O XML fornecido pelo operador contém 25 aplicações de dispositivos, `schemaVersion="1.0"` e coletor `26.09.000 (BLD_22)`. Essa versão é do **Inventory Collector**, não comprova a versão do executável DSU. O arquivo identifica os quatro discos físicos atrás da PERC, seus modelos, ComponentIDs e baias; também traz os PCI IDs das seis interfaces Broadcom. Não foi necessário consultar o iDRAC para obter essas informações.
+
+O reprocessamento offline do XML com os 323 downloads do HAR R530/Windows Server 2016 produziu:
+
+| Resultado em escopo | Texto anterior | XML com as regras de disco |
+| --- | --- | --- |
+| Pendências identificadas | 2 | 5 |
+| Atualizados na referência | 1 | 2 |
+| Inconclusivos | 16 | 12 |
+| Total em escopo | 19 | 19 |
+
+As três pendências adicionais são **baia 0 Toshiba EG02 → EG03** e **baias 2 e 3 Seagate LA0B → LA0C**. A baia 1 Toshiba já informa EG03. Os 12 inconclusivos restantes são seis firmwares de interfaces Broadcom, duas fontes, dois drivers com versão zero, SEP e CPLD. Os IDs agora ficam disponíveis no CSV de verificação, mas não bastam para atribuir uma versão de pacote a esses dispositivos sem regras adicionais.
+
+Esse resultado valida o **reprocessamento local dos arquivos recebidos**, não uma nova coleta DSU no servidor nem teste de compatibilidade dos DUPs. As 18 regressões adicionais cobrem XML UTF-16, importação textual, instâncias, DTD, arquivos incompletos/grandes, ajuda/coleta simuladas, identidades divergentes, versões desconhecidas e CSVs. Os originais operacionais em `.tmp/`, os HARs e `InventarioDell*.xml` na raiz ficam ignorados pelo Git. Só amostras revisadas, sem identidade de cliente e com proveniência documentada entram em `tests/fixtures`.
+
+O modo Site salva `inventory.normalizado.json` com as instâncias e IDs disponíveis. A coleta automática XML fica em `inventory.xml`; a importação guarda `inventory.importado.xml` ou `.txt` no diagnóstico. O snapshot XML importado é convertido para UTF-8 com declaração coerente, sem alterar o original UTF-16. Esses diagnósticos continuam sendo dados operacionais do cliente.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 80 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 98 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 
@@ -425,10 +476,12 @@ A configuração segue a [sintaxe oficial de workflows](https://docs.github.com/
 
 ## Referências Dell
 
-Consultadas em **28/10/2026**. Diferencie a documentação pública dos produtos, os recursos do próprio site usados como evidência empírica e os termos gerais, que não foram confirmados como contrato específico do endpoint interno.
+Consultadas em **28 e 29/10/2026**. Diferencie a documentação pública dos produtos, os recursos do próprio site usados como evidência empírica e os termos gerais, que não foram confirmados como contrato específico do endpoint interno.
 
 - [Dell System Update — apresentação e documentação][dsu].
 - [DSU — inventário e exportação][inventario-dsu].
+- [DSU 1.9.2.0 — manual, exportação XML][xml-dsu].
+- Pacotes de disco: [Toshiba EG03 / RG9MK][toshiba-eg03] e [Seagate LA0C / P183W][seagate-la0c], conferidos em 29/10/2026. Sustentam modelo e versão publicados; não certificam as regras locais de associação nem os pré-requisitos de cada servidor.
 - [PowerEdge — métodos de atualização e downloads gratuitos][metodos-dell].
 - [PowerEdge — tipos e cobertura dos catálogos][catalogos].
 - [DSU — preview][preview-dsu] e [códigos de retorno][retornos-dsu].
@@ -437,6 +490,9 @@ Consultadas em **28/10/2026**. Diferencie a documentação pública dos produtos
 - [Termos de uso do site no Brasil][termos-site-br], [termos gerais de APIs][termos-api] e [privacidade na América Latina][privacidade].
 
 [dsu]: https://www.dell.com/support/kbdoc/en-us/000130590/dell-emc-system-update-dsu
+[xml-dsu]: https://dl.dell.com/topicspdf/system-update_users-guide2_en-us.pdf
+[toshiba-eg03]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=rg9mk
+[seagate-la0c]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=p183w
 [inventario-dsu]: https://www.dell.com/support/manuals/en-us/system-update/dsu_2.1.0.0_ug/inventory?guid=guid-d1f74624-9edd-4218-998d-d85c90f1c5cc&lang=en-us
 [metodos-dell]: https://www.dell.com/support/kbdoc/en-us/000128194/updating-firmware-and-drivers-on-dell-emc-poweredge-servers
 [catalogos]: https://www.dell.com/support/kbdoc/en-us/000132986/dell-emc-catalog-links-for-poweredge-servers

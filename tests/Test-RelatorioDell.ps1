@@ -844,6 +844,192 @@ Getting System Inventory ...
         }
         finally { $writer.Dispose() }
     }
+    # XML reduzido e sem identidade de cliente; IDs e versões reais preservados.
+    $xmlTexto = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\Inventario-R530.xml'))
+    $xmlInventario = @(ConvertFrom-DsuInventoryXml -Texto $xmlTexto)
+    $siteDiscos = ConvertFrom-DellSiteResponse -Texto ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\dell-r530-discos.json'))) -Produto 'poweredge-r530'
+    $downloadsXml = @($site.DriverListData) + @($siteDiscos.DriverListData)
+    $avaliacoesXml = @(New-SiteAssessmentRows $xmlInventario $downloadsXml SRV-EXEMPLO TESTE 'PowerEdge R530' WST14)
+    $discosXml = @($xmlInventario | Where-Object { $_.FQDD -like 'Disk.Bay.*' })
+
+    Test-Case 'XML preserva todas as instancias e identifica discos atras da PERC' {
+        Assert-Equal 25 $xmlInventario.Count
+        Assert-Equal 4 $discosXml.Count
+        Assert-Equal 'MG04SCA20ENY' $discosXml[0].ModeloDispositivo
+        Assert-Equal '105266' $discosXml[0].ComponentID
+        Assert-True ($discosXml[0].Nome -like 'Firmware for*Disk 0*')
+        Assert-Equal 'EG02' $discosXml[0].Versao
+        Assert-Equal 'EG03' $discosXml[1].Versao
+        Assert-True ($discosXml[0].FQDD -ne $discosXml[1].FQDD)
+        $nic = @($xmlInventario | Where-Object VendorID -eq '14E4')[0]
+        Assert-Equal '165F' $nic.DeviceID
+        Assert-Equal '2003' $nic.SubDeviceID
+        Assert-Equal '14E4' $nic.SubVendorID
+        Assert-Equal '5' $nic.Bus
+        Assert-Equal '0' $nic.Function
+    }
+    Test-Case 'XML UTF-16 com BOM e importado sem perder versoes ou modelos' {
+        $arquivo = Join-Path $pastaTeste 'unicode.xml'
+        [IO.File]::WriteAllText($arquivo, ($xmlTexto -replace 'utf-8', 'UTF-16'), [Text.Encoding]::Unicode)
+        $r = @(Import-DsuInventory -Arquivo $arquivo -Pasta $pastaTeste)
+        Assert-Equal 25 $r.Count
+        Assert-Equal 'MG04SCA20ENY' $r[8].ModeloDispositivo
+        Assert-Equal 25 @(Import-DsuInventory -Arquivo (Join-Path $pastaTeste 'inventory.importado.xml')).Count
+        $snapshot = New-Object Xml.XmlDocument
+        $snapshot.Load((Join-Path $pastaTeste 'inventory.importado.xml'))
+        Assert-Equal 'UTF-8' $snapshot.FirstChild.Encoding
+    }
+    Test-Case 'Importacao textual continua compativel e exige encerramento' {
+        $arquivo = Join-Path $pastaTeste 'importado.txt'
+        [IO.File]::WriteAllText($arquivo, $inventarioRealTexto)
+        Assert-Equal 25 @(Import-DsuInventory -Arquivo $arquivo).Count
+        [IO.File]::WriteAllText($arquivo, ($inventarioRealTexto -replace 'Exiting DSU!', ''))
+        Assert-Throws { Import-DsuInventory -Arquivo $arquivo }
+    }
+    Test-Case 'XML truncado, vazio, catalogo e schema desconhecido sao rejeitados' {
+        foreach ($texto in @('', '<SVMInventory schemaVersion="1.0">', '<Manifest/>', '<SVMInventory schemaVersion="2.0"/>', '<SVMInventory schemaVersion="1.0"/>')) {
+            Assert-Throws { ConvertFrom-DsuInventoryXml -Texto $texto }
+        }
+        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace '<Application display="BIOS"[^>]*/>', '') }
+        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace 'version="EG02"', 'version=""') }
+    }
+    Test-Case 'XML rejeita entidades externas e DTD mesmo se parecer inventario' {
+        $xxe = '<!DOCTYPE SVMInventory [<!ENTITY e SYSTEM "file:///C:/Windows/win.ini">]><SVMInventory schemaVersion="1.0"><Device><Application display="&e;" version="1.0" componentType="BIOS"/></Device></SVMInventory>'
+        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto $xxe }
+    }
+    Test-Case 'Inventario acima de 10 MiB e rejeitado antes de interpretar' {
+        $arquivo = Join-Path $pastaTeste 'inventario-grande.xml'
+        $stream = [IO.File]::Create($arquivo)
+        try { $stream.SetLength(10MB + 1) } finally { $stream.Dispose() }
+        Assert-Throws { Import-DsuInventory -Arquivo $arquivo }
+    }
+    Test-Case 'XML permite multiplas Application sem perder dispositivo ou tipo' {
+        $texto = '<SVMInventory schemaVersion="1.0"><Device display="NIC" vendorID="14E4"><Application display="NIC FW" version="1.0" componentType="FRMW"/><Application display="NIC Driver" version="2.0" componentType="DRVR"/></Device></SVMInventory>'
+        $r = @(ConvertFrom-DsuInventoryXml -Texto $texto)
+        Assert-Equal 2 $r.Count
+        Assert-Equal 'FRMW' $r[0].Tipo
+        Assert-Equal 'DRVR' $r[1].Tipo
+    }
+    Test-Case 'Argumentos usam XML somente se anunciado na ajuda sem opcao de instalacao' {
+        $r = @(Get-SiteInventoryArguments -Ajuda '--inventory --output-inventory-xml=<FILE>' -ArquivoXml 'C:\pasta com espaco\inv.xml')
+        Assert-Equal 2 $r.Count
+        Assert-Equal '--inventory' $r[0]
+        Assert-Equal '--output-inventory-xml=C:\pasta com espaco\inv.xml' $r[1]
+        Assert-Equal 1 @(Get-SiteInventoryArguments -Ajuda '--inventory --output-inventory-xml-other' -ArquivoXml X).Count
+        Assert-Throws { Get-SiteInventoryArguments -Ajuda '--preview --output-inventory-xml=<FILE>' -ArquivoXml X }
+    }
+    Test-Case 'Discos com identidade XML reduzem quatro inconclusivos preservando as baias' {
+        Assert-Equal 19 $avaliacoesXml.Count
+        Assert-Equal 5 @($avaliacoesXml | Where-Object Status -eq Pendente).Count
+        Assert-Equal 12 @($avaliacoesXml | Where-Object Status -eq Inconclusivo).Count
+        Assert-Equal 2 @($avaliacoesXml | Where-Object Status -eq 'Atualizado na referência').Count
+        $r = @($avaliacoesXml | Where-Object { $_.FQDD -like 'Disk.Bay.*' })
+        Assert-Equal 'Pendente' $r[0].Status
+        Assert-Equal 'EG03' $r[0].VersaoNova
+        Assert-Equal 'Atualizado na referência' $r[1].Status
+        Assert-Equal 'Pendente' $r[2].Status
+        Assert-Equal 'LA0C' $r[2].VersaoNova
+        Assert-Equal 'Pendente' $r[3].Status
+        Assert-True ($r[0].NomeDoPacote -like '*RG9MK*')
+        Assert-True ($r[2].NomeDoPacote -like '*P183W*')
+    }
+    Test-Case 'Modelo ou ComponentID diferente e FQDD ausente nao recebem regra de disco' {
+        foreach ($campo in @('ModeloDispositivo','ComponentID','FQDD','Tipo')) {
+            $copia = $discosXml[0].PSObject.Copy()
+            $copia.$campo = 'OUTRO'
+            Assert-True ($null -eq (Get-DellDiskRule $copia))
+        }
+        $copia = $discosXml[2].PSObject.Copy()
+        $copia.ModeloDispositivo = 'ST8000NM023B-OUTRO'
+        Assert-True ($null -eq (Get-DellDiskRule $copia))
+    }
+    Test-Case 'DriverId ou titulo de outro disco nao e aceito por semelhanca' {
+        foreach ($campo in @('DriverId','DriverName')) {
+            $copia = $siteDiscos.DriverListData[0].PSObject.Copy()
+            $copia.$campo = 'OUTRO'
+            $r = @(New-SiteAssessmentRows @($discosXml[0]) @($copia) X Y Z WST14)
+            Assert-Equal 'Inconclusivo' $r[0].Status
+            Assert-Equal '' $r[0].NomeDoPacote
+        }
+    }
+    Test-Case 'Firmware alfanumerico desconhecido nao e ordenado nem gera downgrade' {
+        $regra = Get-DellDiskRule $discosXml[0]
+        Assert-True ($null -eq (Compare-DellDiskVersion $regra 'EG04' 'EG03'))
+        Assert-True ($null -eq (Compare-DellDiskVersion $regra 'EG01' 'EG03'))
+        Assert-True ($null -eq (Compare-DellDiskVersion $regra 'EG02' 'EG04'))
+        $copia = $discosXml[0].PSObject.Copy()
+        $copia.Versao = 'EG04'
+        $r = @(New-SiteAssessmentRows @($copia) $downloadsXml X Y Z WST14)
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-True ($r[0].Motivo -match 'par de versões')
+    }
+    Test-Case 'Nova versao publicada de disco e pacote Linux permanecem inconclusivos' {
+        $copia = $siteDiscos.DriverListData[0].PSObject.Copy()
+        $copia.DellVer = 'EG04, A00'
+        $r = @(New-SiteAssessmentRows @($discosXml[0]) @($copia) X Y Z WST14)
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        $copia.FileFrmtInfo = [pscustomobject]@{FileName='disco.BIN';FileType='LLXP'}
+        $copia.OthFileFrmts = @()
+        $r = @(New-SiteAssessmentRows @($discosXml[0]) @($copia) X Y Z WST14)
+        Assert-Equal '' $r[0].NomeDoPacote
+    }
+    Test-Case 'NIC com PCI IDs e fonte com ComponentID nao ganham regra por suposicao' {
+        $r = @($avaliacoesXml | Where-Object { $_.VendorID -eq '14E4' -or $_.ComponentID -eq '101095' })
+        Assert-Equal 8 $r.Count
+        foreach ($item in $r) { Assert-Equal 'Inconclusivo' $item.Status }
+    }
+    Test-Case 'CSV XML mantem dez colunas e auditoria inclui modelo baia e PCI IDs' {
+        $arquivo = Join-Path $pastaTeste 'xml.csv'
+        Export-SiteAssessment $avaliacoesXml $arquivo X Y Z
+        $principal = @(Import-Csv -LiteralPath $arquivo -Delimiter ';' -Encoding UTF8)
+        Assert-Equal 6 $principal.Count
+        Assert-Equal 10 @($principal[0].PSObject.Properties).Count
+        Assert-Equal 'Urgente' $principal[0].Criticidade
+        Assert-True ($principal[-1].Componente -like 'Verificação parcial: 12*')
+        $auditoria = @(Import-Csv -LiteralPath (Join-Path $pastaTeste 'xml_Verificacao.csv') -Delimiter ';' -Encoding UTF8)
+        Assert-Equal 19 $auditoria.Count
+        Assert-Equal 'MG04SCA20ENY' $auditoria[6].ModeloDispositivo
+        Assert-True (@($auditoria | Where-Object DeviceID -eq '165F').Count -eq 6)
+        Assert-Equal 'EF-BB-BF' ([BitConverter]::ToString(([IO.File]::ReadAllBytes($arquivo))[0..2]))
+    }
+    # Simula somente o processo DSU: testa a coleta XML sem DSU nem hardware.
+    $wrapperOriginal = ${function:Invoke-DsuReadOnly}
+    $script:XmlColetaTeste = $xmlTexto
+    $script:TextoColetaTeste = 'Exiting DSU!'
+    $script:CodigoColetaTeste = 0
+    $script:CriarXmlTeste = $true
+    function Invoke-DsuReadOnly {
+        param($Executavel, $Argumentos, $Etapa, $LimiteMinutos)
+        if ($script:CriarXmlTeste -and $Argumentos.Count -gt 1) {
+            [IO.File]::WriteAllText($Argumentos[1].Substring('--output-inventory-xml='.Length), $script:XmlColetaTeste)
+        }
+        [pscustomobject]@{Text=$script:TextoColetaTeste; ExitCode=$script:CodigoColetaTeste}
+    }
+    try {
+        Test-Case 'Coleta automatica interpreta XML gerado pelo processo DSU' {
+            Assert-Equal 25 @(Get-DsuSiteInventory DSU '--inventory --output-inventory-xml=<FILE>' $pastaTeste 1).Count
+        }
+        Test-Case 'XML ausente malformado e erro DSU interrompem sem fallback textual' {
+            Remove-Item -LiteralPath (Join-Path $pastaTeste 'inventory.xml')
+            $script:CriarXmlTeste = $false
+            Assert-Throws { Get-DsuSiteInventory DSU '--inventory --output-inventory-xml=<FILE>' $pastaTeste 1 }
+            $script:CriarXmlTeste = $true
+            $script:XmlColetaTeste = '<incompleto>'
+            Assert-Throws { Get-DsuSiteInventory DSU '--inventory --output-inventory-xml=<FILE>' $pastaTeste 1 }
+            $script:XmlColetaTeste = $xmlTexto
+            $script:CodigoColetaTeste = 1
+            Assert-Throws { Get-DsuSiteInventory DSU '--inventory --output-inventory-xml=<FILE>' $pastaTeste 1 }
+            $script:CodigoColetaTeste = 0
+            $script:TextoColetaTeste = 'ERROR inventory failed'
+            Assert-Throws { Get-DsuSiteInventory DSU '--inventory --output-inventory-xml=<FILE>' $pastaTeste 1 }
+        }
+        Test-Case 'DSU sem exportacao XML mantem coleta textual validada' {
+            $script:TextoColetaTeste = $inventarioRealTexto
+            Assert-Equal 25 @(Get-DsuSiteInventory DSU '--inventory' $pastaTeste 1).Count
+        }
+    }
+    finally { ${function:Invoke-DsuReadOnly} = $wrapperOriginal }
+
     Test-Case 'Wrapper nativo captura stdout e stderr e encerra sem pipe bloqueado' {
         $script:Diagnostico = $pastaTeste
         $exe = Join-Path $PSHOME 'powershell.exe'

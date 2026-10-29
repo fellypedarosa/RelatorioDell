@@ -49,10 +49,12 @@ Abra o Windows PowerShell 5.1 **como administrador**, na pasta do script, e exec
 O padrão continua sendo `-Fonte Site -ConsultaSite Modelo`. O script lê a referência local e coleta o inventário com o DSU. Para reutilizar um inventário já concluído **no mesmo servidor**:
 
 ```powershell
-.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.xml"
 ```
 
-O arquivo de inventário precisa conter `Exiting DSU!`. Para definir a pasta de relatórios, acrescente `-CaminhoSaida 'C:\RelatoriosDell'` ou o caminho UNC desejado. Não combine `-ArquivoSiteDell` com `-Catalogo` ou `-Fonte Catalogo`: isso gera erro.
+Prefira o XML `SVMInventory`: ele preserva modelos físicos e identificadores que podem faltar no resumo textual. Sem arquivo importado, o script solicita XML automaticamente quando a ajuda do DSU anuncia a opção. O texto antigo `.txt` continua aceito, exigindo `Exiting DSU!`; XML exige estrutura completa e válida. A importação não comprova a identidade da máquina: use somente inventário deste servidor. Veja as [regras de disco e limitações no README](../README.md#discos-regras-restritas-sem-ordenação-alfabética).
+
+Para definir a pasta de relatórios, acrescente `-CaminhoSaida 'C:\RelatoriosDell'` ou o caminho UNC desejado. Não combine `-ArquivoSiteDell` com `-Catalogo` ou `-Fonte Catalogo`: isso gera erro.
 
 O script não refaz a consulta de downloads ao site quando o HAR foi informado. O próprio DSU pode usar a rede para obter seu coletor de inventário; com inventário importado, essa nova coleta não é necessária.
 
