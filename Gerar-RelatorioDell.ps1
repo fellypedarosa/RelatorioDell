@@ -20,6 +20,11 @@ bloquear esse acesso automatizado com HTTP 403.
 .PARAMETER ArquivoInventario
 Reutiliza um inventário textual já coletado neste servidor, com Exiting DSU! ao final.
 Válido para Fonte Site; evita repetir uma consulta demorada do DSU.
+.PARAMETER ArquivoSiteDell
+Importa os downloads de um arquivo .har exportado manualmente do Edge ou Chrome.
+Substitui a consulta online ao site, mantendo o inventário e a comparação locais.
+O HAR precisa conter a resposta de downloads do modelo e Windows deste servidor.
+Não combine com Catalogo. Consulte docs/Importacao-Manual-Dell.md para capturar.
 .PARAMETER CodigoProduto
 Código opcional do produto na URL Dell, por exemplo poweredge-r530.
 .PARAMETER CodigoSO
@@ -36,6 +41,7 @@ param(
     [ValidateSet('Site', 'Catalogo')][string]$Fonte = 'Site',
     [ValidateSet('ServiceTag', 'Modelo')][string]$ConsultaSite = 'Modelo',
     [string]$ArquivoInventario,
+    [ValidateNotNullOrEmpty()][string]$ArquivoSiteDell,
     [string]$CodigoProduto,
     [string]$CodigoSO,
     [string]$Catalogo = 'https://downloads.dell.com/catalog/Catalog.xml.gz',
@@ -636,6 +642,157 @@ function Get-DellSiteDownloads {
     return $raiz
 }
 
+function Assert-DellInputParameters {
+    param([string]$Fonte, [string]$ArquivoSiteDell, [string]$ArquivoInventario, [bool]$CatalogoInformado)
+    if ($ArquivoSiteDell -and ($Fonte -ne 'Site' -or $CatalogoInformado)) {
+        throw '-ArquivoSiteDell é suportado apenas com -Fonte Site e não pode ser combinado com -Catalogo.'
+    }
+    if ($Fonte -eq 'Catalogo' -and $ArquivoInventario) { throw '-ArquivoInventario é suportado apenas com -Fonte Site.' }
+}
+
+function Get-DellHarRequestContext {
+    param($Requisicao)
+    # Apenas identifica a requisição. Nenhum endereço do HAR é acessado.
+    $uri = $null
+    if (-not [Uri]::TryCreate([string](Get-ObjectValue $Requisicao 'url'), [UriKind]::Absolute, [ref]$uri)) { return $null }
+    if ($uri.Scheme -ne 'https' -or $uri.Host -ine 'www.dell.com' -or -not $uri.IsDefaultPort -or $uri.UserInfo -or $uri.Fragment) { return $null }
+    if ($uri.AbsolutePath -notmatch '^/support/driver/[a-z]{2}-[a-z]{2}/dep/api/driverlist/packdriversby(?<escopo>product|tag)/?$') { return $null }
+    $tipo = if ($Matches['escopo'] -ieq 'tag') { 'ServiceTag' } else { 'Modelo' }
+    if ([string](Get-ObjectValue $Requisicao 'method') -ine 'GET') { throw 'A captura contém uma chamada de downloads com método não reconhecido. Exporte uma nova captura conforme a documentação.' }
+    $parametros = @{}
+    foreach ($parte in $uri.Query.TrimStart('?').Split('&')) {
+        if (-not $parte) { continue }
+        $par = $parte -split '=', 2
+        $nome = [Uri]::UnescapeDataString($par[0].Replace('+', ' ')).ToLowerInvariant()
+        $valor = if ($par.Count -eq 2) { [Uri]::UnescapeDataString($par[1].Replace('+', ' ')) } else { '' }
+        if ($parametros.ContainsKey($nome)) { throw 'Parâmetros duplicados na requisição Dell do HAR. Faça uma captura limpa de apenas um servidor.' }
+        $parametros[$nome] = $valor
+    }
+    foreach ($campo in @('productcode', 'oscode', 'lob')) {
+        if (-not $parametros.ContainsKey($campo) -or [string]::IsNullOrWhiteSpace($parametros[$campo])) { throw "A requisição do HAR não informa '$campo'. Capture novamente a lista de downloads." }
+    }
+    $token = if ($parametros.ContainsKey('servicetag')) { [string]$parametros['servicetag'] } else { '' }
+    if ($tipo -eq 'ServiceTag' -and -not $token) { throw 'Requisição por tag sem identificador no HAR.' }
+    return [pscustomobject]@{
+        Produto = $parametros['productcode']; SO = $parametros['oscode']; Familia = $parametros['lob']
+        Tipo = $tipo; Token = $token; Endpoint = $uri.GetLeftPart([UriPartial]::Path)
+    }
+}
+
+function ConvertTo-DellHarReference {
+    param($Raiz)
+    # Copia somente os campos usados na comparação. Não propaga cookies,
+    # cabeçalhos, HTML, outros acessos nem identificadores da consulta por tag.
+    $downloads = foreach ($item in @($Raiz.DriverListData)) {
+        $formatos = foreach ($formato in @((Get-ObjectValue $item 'OthFileFrmts'))) {
+            if ($null -ne $formato) { [pscustomobject]@{ FileName = [string](Get-ObjectValue $formato 'FileName'); FileType = [string](Get-ObjectValue $formato 'FileType') } }
+        }
+        $principal = Get-ObjectValue $item 'FileFrmtInfo'
+        [pscustomobject][ordered]@{
+            DriverId = [string]$item.DriverId; DriverName = [string]$item.DriverName; Type = [string]$item.Type
+            DellVer = [string]$item.DellVer; Imp = [string](Get-ObjectValue $item 'Imp')
+            ReleaseDate = [string]$item.ReleaseDate; CatName = [string](Get-ObjectValue $item 'CatName')
+            FileFrmtInfo = if ($null -ne $principal) { [pscustomobject]@{ FileName = [string](Get-ObjectValue $principal 'FileName'); FileType = [string](Get-ObjectValue $principal 'FileType') } } else { $null }
+            OthFileFrmts = @($formatos)
+        }
+    }
+    return [pscustomobject][ordered]@{ ProductCode = [string]$Raiz.ProductCode; DriverListData = @($downloads) }
+}
+
+function Import-DellSiteHar {
+    param([string]$Arquivo, [string]$Produto, [string]$SO, [string]$Pasta, [string]$ServiceTag,
+        [ValidateSet('Modelo', 'ServiceTag')][string]$Consulta = 'Modelo')
+    if (-not (Test-Path -LiteralPath $Arquivo -PathType Leaf)) { throw 'Arquivo HAR não encontrado. Informe -ArquivoSiteDell com o caminho do arquivo exportado.' }
+    $info = Get-Item -LiteralPath $Arquivo
+    if ($info.Extension -ine '.har') { throw 'ArquivoSiteDell deve ser um arquivo .har exportado pela guia Rede do navegador, não HTML, PDF ou CSV.' }
+    # Lê e calcula o hash do mesmo arquivo, impedindo alterações durante a leitura.
+    $stream = [IO.File]::Open($info.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $leitor = $null; $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        if ($stream.Length -eq 0 -or $stream.Length -gt 100MB) { throw 'HAR vazio ou maior que 100 MiB. Limpe a guia Rede e capture somente a página Dell do servidor.' }
+        $leitor = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true, 4096, $true)
+        $texto = $leitor.ReadToEnd()
+        $stream.Position = 0
+        $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
+    }
+    finally { if ($leitor) { $leitor.Dispose() }; $stream.Dispose(); $sha.Dispose() }
+    try { $har = ConvertFrom-Json -InputObject $texto -ErrorAction Stop }
+    catch { throw 'HAR inválido ou truncado. Exporte novamente a captura pelo navegador.' }
+    $entradas = Get-ObjectValue (Get-ObjectValue $har 'log') 'entries'
+    if ($null -eq $entradas -or @($entradas).Count -eq 0) { throw 'O arquivo não contém requisições HAR. Abra F12 > Rede antes de carregar os downloads e exporte com conteúdo.' }
+    $selecionada = $null; $indice = -1; $quantidade = 0
+    foreach ($entrada in @($entradas)) {
+        $indice++
+        $contexto = Get-DellHarRequestContext (Get-ObjectValue $entrada 'request')
+        if ($null -eq $contexto) { continue }
+        if ($contexto.Produto -ine $Produto -or $contexto.SO -ine $SO -or $contexto.Familia -ine 'PowerEdge') { continue }
+        $resposta = Get-ObjectValue $entrada 'response'
+        if ([int](Get-ObjectValue $resposta 'status') -ne 200) { throw 'Uma consulta de downloads deste modelo/SO falhou no HAR. Limpe a guia Rede e salve uma captura com resposta HTTP 200.' }
+        $conteudo = Get-ObjectValue $resposta 'content'
+        $corpo = [string](Get-ObjectValue $conteudo 'text')
+        if ([string]::IsNullOrWhiteSpace($corpo)) { throw 'O HAR não contém o corpo da resposta de downloads. Desative o cache, recarregue a página e exporte HAR com conteúdo.' }
+        $codificacao = [string](Get-ObjectValue $conteudo 'encoding')
+        if ($codificacao -eq 'base64') {
+            try { $corpo = (New-Object Text.UTF8Encoding($false, $true)).GetString([Convert]::FromBase64String($corpo)) }
+            catch { throw 'Corpo base64 inválido na resposta de downloads do HAR.' }
+        }
+        elseif ($codificacao) { throw 'Codificação do corpo HAR não reconhecida. Exporte novamente pelo Edge ou Chrome.' }
+        $instante = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string](Get-ObjectValue $entrada 'startedDateTime'), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$instante)) {
+            throw 'A resposta no HAR não informa uma data de captura válida.'
+        }
+        # Não escolhe arbitrariamente entre capturas de tags/respostas diferentes.
+        if ($selecionada -and ($selecionada.Contexto.Tipo -cne $contexto.Tipo -or $selecionada.Contexto.Token -cne $contexto.Token -or $selecionada.Corpo -cne $corpo)) {
+            throw 'O HAR contém respostas diferentes para este modelo/SO. Limpe a guia Rede e capture apenas uma consulta; nenhuma lista foi escolhida arbitrariamente.'
+        }
+        $quantidade++
+        if ($null -eq $selecionada -or $instante -ge $selecionada.Instante) {
+            $selecionada = [pscustomobject]@{ Contexto = $contexto; Corpo = $corpo; Instante = $instante; Indice = $indice }
+        }
+    }
+    if ($null -eq $selecionada) { throw "Nenhuma resposta Dell de downloads para produto=$Produto e SO=$SO foi encontrada no HAR. Escolha no site o Windows instalado neste servidor e capture novamente." }
+    $raiz = ConvertFrom-DellSiteResponse -Texto $selecionada.Corpo -Produto $Produto
+    if ((Get-ObjectValue $raiz 'IsNoDriversFound') -eq $true) { throw 'A captura Dell indica ausência de dados de downloads. Verificação inconclusiva.' }
+    $recebidos = @($raiz.DriverListData).Count
+    $bruta = ConvertTo-DellHarReference $raiz
+    if ($Consulta -eq 'ServiceTag') {
+        # O token opaco da URL só liga request/response. Não comprova o BIOS local.
+        $tagRetornada = [string](Get-ObjectValue $raiz 'ServiceTag')
+        if ($selecionada.Contexto.Tipo -ne 'ServiceTag' -or [string]::IsNullOrWhiteSpace($ServiceTag) -or $tagRetornada -ine $ServiceTag.Trim()) {
+            throw 'O HAR não comprova a Service Tag local em texto claro. Para usar a lista ampla do modelo, execute sem -ConsultaSite ServiceTag; para filtrar pela tag é necessária uma captura que confirme sua identidade.'
+        }
+        $raiz = ConvertFrom-DellSiteResponse -Texto $selecionada.Corpo -Produto $Produto -ExigirTag -ServiceTag $ServiceTag
+    }
+    else {
+        Write-Log 'Importação manual: usando a lista ampla do modelo/SO. A página aberta por tag não comprova filtro pela tag; o inventário local continua necessário.' 'AVISO'
+    }
+    foreach ($pacote in @($raiz.DriverListData)) {
+        if ($pacote.Type -in @('BIOS', 'FRMW', 'DRVR')) {
+            if (-not (ConvertTo-CriticalityLabel ([string](Get-ObjectValue $pacote 'Imp')))) { throw 'A resposta HAR não informa uma criticidade reconhecida para um download Dell. Verificação inconclusiva.' }
+            if ([string]::IsNullOrWhiteSpace([string](Get-ObjectValue $pacote 'CatName'))) { throw 'A resposta HAR não informa a categoria de um download Dell.' }
+            if ((Get-SiteReleaseDate $pacote) -eq [datetime]::MinValue) { throw 'Data de lançamento não reconhecida em um download do HAR.' }
+        }
+    }
+    $usada = ConvertTo-DellHarReference $raiz
+    # Só persiste as referências normalizadas necessárias, nunca o HAR inteiro.
+    foreach ($saida in @(@('downloads-site-resposta.json', $bruta), @('downloads-site.json', $usada))) {
+        [IO.File]::WriteAllText((Join-Path $Pasta $saida[0]), (ConvertTo-Json -InputObject $saida[1] -Depth 15), (New-Object Text.UTF8Encoding($true)))
+    }
+    @('Fonte=ArquivoHAR', "Consulta=$Consulta", "OrigemConsulta=$($selecionada.Contexto.Tipo)", "Arquivo=$($info.FullName)", "SHA256=$hash",
+        "CapturadoEm=$($selecionada.Instante.ToString('o'))", "ImportadoEm=$((Get-Date).ToString('o'))", "EntradaHAR=$($selecionada.Indice)",
+        "Endpoint=$($selecionada.Contexto.Endpoint)", "Produto=$Produto", "SO=$SO", "RegistrosRecebidos=$recebidos", "RegistrosUsados=$(@($usada.DriverListData).Count)", "RespostasIdenticas=$quantidade") |
+        Set-Content -LiteralPath (Join-Path $Pasta 'fonte-site.txt') -Encoding UTF8
+    Write-Log "HAR importado: produto=$Produto; SO=$SO; seleção=$Consulta; capturado em $($selecionada.Instante.ToString('o')); $(@($usada.DriverListData).Count) downloads."
+    return $usada
+}
+
+function Get-DellSiteReference {
+    param([string]$ArquivoSiteDell, [string]$Produto, [string]$SO, [string]$Pasta, [string]$ServiceTag,
+        [ValidateSet('Modelo', 'ServiceTag')][string]$Consulta = 'Modelo')
+    if ($ArquivoSiteDell) { return Import-DellSiteHar -Arquivo $ArquivoSiteDell -Produto $Produto -SO $SO -Pasta $Pasta -ServiceTag $ServiceTag -Consulta $Consulta }
+    return Get-DellSiteDownloads -Produto $Produto -SO $SO -Pasta $Pasta -ServiceTag $ServiceTag -Consulta $Consulta
+}
+
 function Get-ValidatedInventory {
     param([string]$Texto, [switch]$ExigirEncerramento)
     $linhas = @(Get-DsuTextLines $Texto)
@@ -821,7 +978,7 @@ $tlsAnterior = [Net.ServicePointManager]::SecurityProtocol
 try {
     # Mantém compatibilidade com chamadas antigas que informam apenas -Catalogo.
     if ($PSBoundParameters.ContainsKey('Catalogo') -and -not $PSBoundParameters.ContainsKey('Fonte')) { $Fonte = 'Catalogo' }
-    if ($Fonte -eq 'Catalogo' -and $ArquivoInventario) { throw '-ArquivoInventario é suportado apenas com -Fonte Site.' }
+    Assert-DellInputParameters -Fonte $Fonte -ArquivoSiteDell $ArquivoSiteDell -ArquivoInventario $ArquivoInventario -CatalogoInformado ($PSBoundParameters.ContainsKey('Catalogo'))
     try {
         if ([string]::IsNullOrWhiteSpace($CaminhoSaida)) { $CaminhoSaida = Join-Path $PSScriptRoot 'Relatorios' }
         $CaminhoSaida = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CaminhoSaida)
@@ -857,8 +1014,9 @@ try {
         if ($sistemaOperacional.ProductType -eq 1) { throw 'Execute no Windows Server alvo, não em um Windows cliente.' }
         $produto = Get-DellProductCode -Modelo $modelo -Informado $CodigoProduto
         $so = Get-DellOsCode -Legenda ([string]$sistemaOperacional.Caption) -Informado $CodigoSO
-        Write-Log "Fonte: site Dell; consulta=$ConsultaSite; produto=$produto; Windows=$($sistemaOperacional.Caption); código SO=$so."
-        $dadosSite = Get-DellSiteDownloads -Produto $produto -SO $so -Pasta $script:Diagnostico -ServiceTag $serviceTag -Consulta $ConsultaSite
+        $origemSite = if ($ArquivoSiteDell) { 'arquivo HAR manual' } else { 'site Dell online' }
+        Write-Log "Fonte: $origemSite; consulta=$ConsultaSite; produto=$produto; Windows=$($sistemaOperacional.Caption); código SO=$so."
+        $dadosSite = Get-DellSiteReference -ArquivoSiteDell $ArquivoSiteDell -Produto $produto -SO $so -Pasta $script:Diagnostico -ServiceTag $serviceTag -Consulta $ConsultaSite
         if ($ArquivoInventario) {
             $caminhoInventario = (Get-Item -LiteralPath $ArquivoInventario -ErrorAction Stop).FullName
             $textoInventario = Read-SharedText -Arquivo $caminhoInventario

@@ -1,0 +1,51 @@
+name: Testes PowerShell
+
+on:
+  push:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testes-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    name: PowerShell 5.1 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Obter codigo
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Conferir Windows PowerShell 5.1 e codificacao
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+              throw 'Os testes precisam executar em Windows PowerShell 5.1.'
+          }
+          foreach ($arquivo in @('Gerar-RelatorioDell.ps1', 'tests/Test-RelatorioDell.ps1')) {
+              $bytes = [IO.File]::ReadAllBytes((Join-Path $env:GITHUB_WORKSPACE $arquivo))
+              if ($bytes.Length -lt 3 -or [BitConverter]::ToString($bytes[0..2]) -ne 'EF-BB-BF') {
+                  throw "O arquivo $arquivo deve usar UTF-8 com BOM."
+              }
+          }
+          Write-Output "Runtime: $($PSVersionTable.PSVersion)"
+
+      - name: Executar testes offline
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tests\Test-RelatorioDell.ps1

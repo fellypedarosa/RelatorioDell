@@ -32,3 +32,11 @@ Alterações na resposta online não devem mudar silenciosamente estes fixtures.
 Os campos `IsTag`, `ServiceTag`, `IsNoDriversFoundForTag` e `IsTagDriver` usados nos novos testes são **sintéticos**, acrescentados em memória pelo harness. A tag `ABC1234` e o identificador `0-TOKEN_SINTETICO_1234567890` são exemplos fictícios. Não representam uma consulta real por tag nem uma contagem validada online.
 
 A seleção `IsTagDriver > 0` e o uso de `encryptedServiceTag` foram observados no JavaScript oficial da Dell. A tentativa de acesso online à página de uma tag real recebeu HTTP 403 neste ambiente; a evidência está em [docs/evidencias/api-dell-service-tag-2026-10-28.json](../../docs/evidencias/api-dell-service-tag-2026-10-28.json). Nenhuma tag real ou seu identificador foi incorporado aos arquivos de teste.
+
+## Capturas HAR da importação manual
+
+Os testes constroem capturas HAR **sintéticas** durante a execução, usando os seis downloads do JSON reduzido e os mesmos identificadores fictícios. As capturas, seus timestamps e os headers/cookies de teste não representam uma navegação real. São gravadas somente no diretório temporário exclusivo da suíte e removidas ao final. Não há um HAR de cliente incorporado ao repositório.
+
+São exercitados corpos abertos, transformação Dell e codificação base64; contexto de modelo/SO; origem e método HTTP; respostas vazias ou com erro; capturas duplicadas/conflitantes; identidade clara de tag; metadados de proveniência e descarte de dados privados. Um caso cria arquivo acima de 100 MiB para testar a rejeição pelo tamanho antes da leitura. Outro inclui dados irrelevantes acima de 2 MiB para verificar a leitura no Windows PowerShell 5.1.
+
+Sentinelas artificiais de cookies, autorização e campos privados permitem confirmar que o importador não copia o HAR integral para os diagnósticos. O cenário de regressão conserva as duas pendências e os 16 componentes inconclusivos da referência original. Os testes não demonstram que uma exportação real do navegador tenha sido recebida ou que a consulta automática por Service Tag funcione online.

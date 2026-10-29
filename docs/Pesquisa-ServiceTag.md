@@ -2,6 +2,8 @@
 
 Pesquisa realizada em **28/10/2026**, considerando PowerEdge com Windows Server, execução independente por cliente e relatório sem instalação de atualizações.
 
+**Atualização da implementação:** a alternativa de importar um HAR está disponível por `-ArquivoSiteDell`, com testes offline e uma execução real validada em 29/10/2026 em R530/Windows Server 2016. A captura recebida usou escopo Modelo, não filtro por tag. O procedimento está em [Importação manual](Importacao-Manual-Dell.md) e os resultados estão no [README](../README.md#validação-real-da-importação-manual-em-29102026). As seções abaixo preservam a pesquisa original e suas propostas; não descrevem uma API automática por tag validada.
+
 ## Recomendação
 
 O caminho a validar primeiro é **obter pelo navegador os dados da página Dell aberta pela Service Tag e comparar essa referência com o inventário atual do servidor**. A coleta pelo navegador pode começar assistida pelo analista e, depois de validada, receber automação. Isso permite investigar uma alternativa ao acesso direto que retornou HTTP 403, sem depender de uma nova API pública ainda não encontrada.
