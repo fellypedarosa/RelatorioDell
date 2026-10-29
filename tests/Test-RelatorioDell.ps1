@@ -470,6 +470,250 @@ Getting System Inventory ...
         }
     }
     finally { Remove-Item -LiteralPath Function:\Invoke-WebRequest }
+    # HARs abaixo sao sinteticos: preservam o schema do navegador e reutilizam
+    # somente os seis registros publicos do fixture. Nenhum HAR de cliente e salvo.
+    function New-HarTestEntry {
+        param(
+            [string]$Texto,
+            [string]$Url = 'https://www.dell.com/support/driver/en-us/dep/api/driverlist/packdriversbyproduct?productcode=poweredge-r530&oscode=W12R2&lob=PowerEdge',
+            [int]$Status = 200,
+            [string]$Encoding = '',
+            [string]$CapturadoEm = '2026-10-29T13:00:00.000Z'
+        )
+        $conteudo = [pscustomobject]@{ text = $Texto; mimeType = 'text/plain'; size = ([Text.Encoding]::UTF8.GetByteCount($Texto)) }
+        if ($Encoding) { $conteudo | Add-Member -NotePropertyName encoding -NotePropertyValue $Encoding }
+        return [pscustomobject]@{
+            startedDateTime = $CapturadoEm
+            request = [pscustomobject]@{ method = 'GET'; url = $Url; headers = @(); cookies = @() }
+            response = [pscustomobject]@{ status = $Status; content = $conteudo; headers = @(); cookies = @() }
+        }
+    }
+    function Write-HarTestFile {
+        param([object[]]$Entradas)
+        $arquivoHar = Join-Path $pastaTeste ('captura_' + [guid]::NewGuid().ToString('N') + '.har')
+        $har = [pscustomobject]@{ log = [pscustomobject]@{ version = '1.2'; creator = [pscustomobject]@{ name = 'Harness sintetico'; version = '1' }; entries = @($Entradas) } }
+        [IO.File]::WriteAllText($arquivoHar, (ConvertTo-Json -InputObject $har -Depth 35), (New-Object Text.UTF8Encoding($true)))
+        return $arquivoHar
+    }
+    function New-HarTestDiagnostic {
+        $pastaHar = Join-Path $pastaTeste ('har_' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($pastaHar)
+        return $pastaHar
+    }
+    $urlTagHar = 'https://www.dell.com/support/driver/en-us/dep/api/driverlist/packdriversbytag?productcode=poweredge-r530&oscode=W12R2&lob=PowerEdge&servicetag=' + $tokenTagTeste
+    $script:ChamadasRedeHar = 0
+    function Invoke-WebRequest {
+        $script:ChamadasRedeHar++
+        throw 'Um importador local nao pode consultar a rede.'
+    }
+    try {
+        Test-Case 'HAR manual e roteador importam sem HTTP e preservam metadados da captura' {
+            $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $siteJson))
+            $diagnosticoHar = New-HarTestDiagnostic
+            $r = Get-DellSiteReference -ArquivoSiteDell $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $diagnosticoHar -ServiceTag ABC1234 -Consulta Modelo
+            Assert-Equal 6 @($r.DriverListData).Count
+            Assert-Equal 0 $script:ChamadasRedeHar
+            $fonteHar = [IO.File]::ReadAllText((Join-Path $diagnosticoHar 'fonte-site.txt'))
+            foreach ($campo in @('Fonte=ArquivoHAR', 'Consulta=Modelo', 'Produto=poweredge-r530', 'SO=W12R2', 'RegistrosRecebidos=6', 'RegistrosUsados=6', 'EntradaHAR=')) {
+                Assert-True ($fonteHar.Contains($campo)) "Metadado ausente: $campo"
+            }
+            Assert-True ($fonteHar -match ('SHA256=' + (Get-FileHash -LiteralPath $arquivoHar -Algorithm SHA256).Hash))
+            Assert-True ($fonteHar -match 'CapturadoEm=.*2026-10-29')
+            Assert-True (Test-Path -LiteralPath (Join-Path $diagnosticoHar 'downloads-site-resposta.json'))
+            Assert-True (Test-Path -LiteralPath (Join-Path $diagnosticoHar 'downloads-site.json'))
+        }
+        Test-Case 'HAR suporta corpo Dell rotacionado dentro de base64 do navegador' {
+            $rotHar = New-Object Text.StringBuilder
+            foreach ($ch in $siteJson.ToCharArray()) {
+                $n = [int]$ch
+                if ($n -ge 65 -and $n -le 90) { $ch = [char](($n - 65 + 3) % 26 + 65) }
+                elseif ($n -ge 97 -and $n -le 122) { $ch = [char](($n - 97 + 3) % 26 + 97) }
+                [void]$rotHar.Append($ch)
+            }
+            $base64Har = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rotHar.ToString()))
+            $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $base64Har -Encoding base64))
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta (New-HarTestDiagnostic) -ServiceTag ABC1234
+            Assert-Equal 'PVDNH' $r.DriverListData[0].DriverId
+            Assert-Equal 6 @($r.DriverListData).Count
+        }
+        Test-Case 'HAR grande com requisicao irrelevante acima de dois MiB e aceito no PS 5.1' {
+            $ruido = New-HarTestEntry -Texto ('x' * 2200000) -Url 'https://www.dell.com/imagem.txt'
+            $arquivoHar = Write-HarTestFile -Entradas @($ruido, (New-HarTestEntry -Texto $siteJson))
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta (New-HarTestDiagnostic) -ServiceTag ABC1234
+            Assert-Equal 6 @($r.DriverListData).Count
+        }
+        Test-Case 'HAR ausente, diretorio ou acima do limite nao e carregado' {
+            Assert-Throws { Import-DellSiteHar -Arquivo (Join-Path $pastaTeste 'inexistente.har') -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            Assert-Throws { Import-DellSiteHar -Arquivo $pastaTeste -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            $grandeHar = Join-Path $pastaTeste 'maior-limite.har'
+            $streamHar = [IO.File]::Open($grandeHar, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+            try { $streamHar.SetLength(100MB + 1) } finally { $streamHar.Dispose() }
+            $mensagemHar = ''
+            try { Import-DellSiteHar -Arquivo $grandeHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 | Out-Null }
+            catch { $mensagemHar = $_.Exception.Message }
+            Assert-True ($mensagemHar -match '100') 'O limite deve ser verificado antes do parsing de um HAR enorme.'
+        }
+        Test-Case 'HAR invalido ou sem entradas nao vira ausencia de atualizacoes' {
+            foreach ($conteudoHar in @('nao e JSON', '{}', '{"log":{"entries":[]}}')) {
+                $arquivoHar = Join-Path $pastaTeste ('invalido_' + [guid]::NewGuid().ToString('N') + '.har')
+                [IO.File]::WriteAllText($arquivoHar, $conteudoHar)
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR seleciona modelo e SO corretos e ignora outras consultas capturadas' {
+            $alvoHar = New-HarTestEntry -Texto $siteJson
+            $outroSOHar = New-HarTestEntry -Texto 'ruido de outro SO' -Url $alvoHar.request.url.Replace('W12R2','WST14')
+            $outroModeloHar = New-HarTestEntry -Texto 'ruido de outro modelo' -Url $alvoHar.request.url.Replace('poweredge-r530','poweredge-r740')
+            $arquivoHar = Write-HarTestFile -Entradas @($outroSOHar, $alvoHar, $outroModeloHar)
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta (New-HarTestDiagnostic) -ServiceTag ABC1234
+            Assert-Equal 6 @($r.DriverListData).Count
+            $semAlvoHar = Write-HarTestFile -Entradas @($outroSOHar, $outroModeloHar)
+            Assert-Throws { Import-DellSiteHar -Arquivo $semAlvoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+        }
+        Test-Case 'HAR nao aceita origem falsa, HTTP ou metodo divergente como downloads Dell' {
+            $alvoHar = New-HarTestEntry -Texto $siteJson
+            foreach ($urlInvalidaHar in @($alvoHar.request.url.Replace('www.dell.com','www.dell.com.exemplo.invalid'), $alvoHar.request.url.Replace('https:','http:'), $alvoHar.request.url.Replace('packdriversbyproduct','packdriversbyproduct-falso'))) {
+                $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $siteJson -Url $urlInvalidaHar))
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+            $alvoHar.request.method = 'POST'
+            $arquivoHar = Write-HarTestFile -Entradas @($alvoHar)
+            Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+        }
+        Test-Case 'HAR rejeita parametros de contexto duplicados na URL' {
+            $alvoHar = New-HarTestEntry -Texto $siteJson
+            foreach ($sufixoHar in @('&productcode=poweredge-r740', '&oscode=WST14')) {
+                $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $siteJson -Url ($alvoHar.request.url + $sufixoHar)))
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR valida produto e schema do corpo mesmo com URL correta' {
+            foreach ($textoInvalidoHar in @($siteJson.Replace('poweredge-r530','poweredge-r740'), '{"ProductCode":"poweredge-r530","DriverListData":[]}', '<html>Access denied</html>')) {
+                $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $textoInvalidoHar))
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR com erro ou corpo ausente no alvo nao usa resposta anterior como sucesso' {
+            $bomHar = New-HarTestEntry -Texto $siteJson
+            $falhaHar = New-HarTestEntry -Texto $siteJson -Status 403
+            $vazioHar = New-HarTestEntry -Texto ''
+            $omitidoHar = New-HarTestEntry -Texto $siteJson
+            $omitidoHar.response.content.PSObject.Properties.Remove('text')
+            foreach ($ruimHar in @($falhaHar, $vazioHar, $omitidoHar)) {
+                $arquivoHar = Write-HarTestFile -Entradas @($bomHar, $ruimHar)
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR rejeita codificacao desconhecida e base64 invalida' {
+            foreach ($ruimHar in @((New-HarTestEntry -Texto $siteJson -Encoding gzip), (New-HarTestEntry -Texto '!!!BASE64_INVALIDA!!!' -Encoding base64))) {
+                $arquivoHar = Write-HarTestFile -Entradas @($ruimHar)
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR aceita duplicatas identicas e registra a ultima captura' {
+            $primeiroHar = New-HarTestEntry -Texto $siteJson -CapturadoEm '2026-10-28T13:00:00.000Z'
+            $ultimoHar = New-HarTestEntry -Texto $siteJson -CapturadoEm '2026-10-29T14:30:00.000Z'
+            $arquivoHar = Write-HarTestFile -Entradas @($primeiroHar, $ultimoHar)
+            $diagnosticoHar = New-HarTestDiagnostic
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $diagnosticoHar -ServiceTag ABC1234
+            Assert-Equal 6 @($r.DriverListData).Count
+            $fonteHar = [IO.File]::ReadAllText((Join-Path $diagnosticoHar 'fonte-site.txt'))
+            Assert-True ($fonteHar -match 'CapturadoEm=.*2026-10-29T14:30:00')
+            Assert-True ($fonteHar -match 'EntradaHAR=')
+        }
+        Test-Case 'HAR rejeita respostas conflitantes em corpo, endpoint ou tag' {
+            $bomHar = New-HarTestEntry -Texto $siteJson
+            $outroCorpoHar = New-HarTestEntry -Texto $siteJson.Replace('2.19.0','2.20.0')
+            $outroEndpointHar = New-HarTestEntry -Texto $siteJson -Url $urlTagHar
+            foreach ($conflitoHar in @($outroCorpoHar, $outroEndpointHar)) {
+                $arquivoHar = Write-HarTestFile -Entradas @($bomHar, $conflitoHar)
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+            $primeiraTagHar = New-HarTestEntry -Texto $jsonTagTeste -Url $urlTagHar
+            $outraTagHar = New-HarTestEntry -Texto $jsonTagTeste -Url $urlTagHar.Replace($tokenTagTeste,'0-OUTRO_TOKEN_SINTETICO_9876543210')
+            $arquivoHar = Write-HarTestFile -Entradas @($primeiraTagHar, $outraTagHar)
+            Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+        }
+        Test-Case 'HAR exige data de captura valida antes de usar os downloads' {
+            $semDataHar = New-HarTestEntry -Texto $siteJson
+            $semDataHar.PSObject.Properties.Remove('startedDateTime')
+            $dataInvalidaHar = New-HarTestEntry -Texto $siteJson -CapturadoEm 'data desconhecida'
+            foreach ($ruimHar in @($semDataHar, $dataInvalidaHar)) {
+                $arquivoHar = Write-HarTestFile -Entradas @($ruimHar)
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 }
+            }
+        }
+        Test-Case 'HAR no padrao Modelo usa lista ampla de endpoint tag e sinaliza o escopo' {
+            $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $jsonTagTeste -Url $urlTagHar))
+            $diagnosticoHar = New-HarTestDiagnostic
+            $inicioMensagensHar = $script:Mensagens.Count
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $diagnosticoHar -ServiceTag ABC1234
+            Assert-Equal 6 @($r.DriverListData).Count
+            $fonteHar = [IO.File]::ReadAllText((Join-Path $diagnosticoHar 'fonte-site.txt'))
+            Assert-True ($fonteHar -match 'Consulta=Modelo' -and $fonteHar -match 'RegistrosUsados=6')
+            $mensagensHar = @($script:Mensagens | Select-Object -Skip $inicioMensagensHar) -join "`n"
+            Assert-True ($mensagensHar -match '\[AVISO\].*(modelo|ampla)')
+        }
+        Test-Case 'HAR com tag clara correspondente filtra registros positivos no modo ServiceTag' {
+            $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $jsonTagTeste -Url $urlTagHar))
+            $diagnosticoHar = New-HarTestDiagnostic
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $diagnosticoHar -ServiceTag ABC1234 -Consulta ServiceTag
+            Assert-Equal 3 @($r.DriverListData).Count
+            Assert-Equal 'PVDNH,VWF72,700GG' (($r.DriverListData | ForEach-Object DriverId) -join ',')
+            $brutaHar = [IO.File]::ReadAllText((Join-Path $diagnosticoHar 'downloads-site-resposta.json')) | ConvertFrom-Json
+            $filtradaHar = [IO.File]::ReadAllText((Join-Path $diagnosticoHar 'downloads-site.json')) | ConvertFrom-Json
+            Assert-Equal 6 @($brutaHar.DriverListData).Count
+            Assert-Equal 3 @($filtradaHar.DriverListData).Count
+        }
+        Test-Case 'HAR ServiceTag rejeita identidade opaca ou diferente da tag do BIOS' {
+            foreach ($identidadeHar in @($tokenTagTeste, 'XYZ9999')) {
+                $copiaHar = $dadosTagTeste.PSObject.Copy(); $copiaHar.ServiceTag = $identidadeHar
+                $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto (ConvertTo-Json -InputObject $copiaHar -Depth 20) -Url $urlTagHar))
+                Assert-Throws { Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 -Consulta ServiceTag }
+            }
+            $arquivoModeloHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $siteJson))
+            Assert-Throws { Import-DellSiteHar -Arquivo $arquivoModeloHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $pastaTeste -ServiceTag ABC1234 -Consulta ServiceTag }
+        }
+        Test-Case 'Parametros manuais aceitam inventario local mas rejeitam catalogo' {
+            Assert-DellInputParameters -Fonte Site -ArquivoSiteDell 'captura.har' -ArquivoInventario 'inventario.txt' -CatalogoInformado $false
+            Assert-DellInputParameters -Fonte Site -ArquivoSiteDell '' -ArquivoInventario '' -CatalogoInformado $false
+            Assert-Throws { Assert-DellInputParameters -Fonte Catalogo -ArquivoSiteDell 'captura.har' -ArquivoInventario '' -CatalogoInformado $false }
+            Assert-Throws { Assert-DellInputParameters -Fonte Site -ArquivoSiteDell 'captura.har' -ArquivoInventario '' -CatalogoInformado $true }
+        }
+        Test-Case 'HAR normaliza somente dados necessarios sem copiar cookies, headers ou token opaco' {
+            $copiaHar = $dadosTagTeste.PSObject.Copy()
+            $copiaHar | Add-Member -NotePropertyName SegredoIgnorado -NotePropertyValue 'SENTINELA_CORPO_PRIVADO'
+            $entradaPrivadaHar = New-HarTestEntry -Texto (ConvertTo-Json -InputObject $copiaHar -Depth 20) -Url $urlTagHar
+            $entradaPrivadaHar.request.headers = @([pscustomobject]@{ name = 'Authorization'; value = 'SENTINELA_AUTH_PRIVADA' })
+            $entradaPrivadaHar.request.cookies = @([pscustomobject]@{ name = 'sessao'; value = 'SENTINELA_COOKIE_PRIVADO' })
+            $entradaPrivadaHar.response.headers = @([pscustomobject]@{ name = 'Set-Cookie'; value = 'SENTINELA_SETCOOKIE_PRIVADO' })
+            $arquivoHar = Write-HarTestFile -Entradas @($entradaPrivadaHar)
+            $diagnosticoHar = New-HarTestDiagnostic
+            $inicioMensagensHar = $script:Mensagens.Count
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta $diagnosticoHar -ServiceTag ABC1234
+            Assert-Equal 6 @($r.DriverListData).Count
+            $persistidoHar = (@(Get-ChildItem -LiteralPath $diagnosticoHar -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n")
+            $mensagensHar = @($script:Mensagens | Select-Object -Skip $inicioMensagensHar) -join "`n"
+            Assert-True (($persistidoHar + $mensagensHar) -notmatch 'SENTINELA_|0-TOKEN_SINTETICO_1234567890')
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $diagnosticoHar -Filter '*.har').Count
+        }
+        Test-Case 'HAR produz a mesma avaliacao de pendencias que a referencia existente' {
+            $arquivoHar = Write-HarTestFile -Entradas @((New-HarTestEntry -Texto $siteJson))
+            $r = Import-DellSiteHar -Arquivo $arquivoHar -Produto 'poweredge-r530' -SO W12R2 -Pasta (New-HarTestDiagnostic) -ServiceTag ABC1234
+            $avaliacoesHar = @(New-SiteAssessmentRows -Inventario $inventarioReal -Downloads $r.DriverListData -Hostname SRV-EXEMPLO -ServiceTag TESTE -Modelo 'PowerEdge R530' -SO W12R2)
+            Assert-Equal $avaliacoes.Count $avaliacoesHar.Count
+            Assert-Equal 2 @($avaliacoesHar | Where-Object Status -eq Pendente).Count
+            Assert-Equal 16 @($avaliacoesHar | Where-Object Status -eq Inconclusivo).Count
+            for ($iHar = 0; $iHar -lt $avaliacoes.Count; $iHar++) {
+                foreach ($colunaHar in @('Componente', 'VersaoAtual', 'VersaoNova', 'Criticidade', 'Status', 'NomeDoPacote')) {
+                    Assert-Equal (Get-ObjectValue $avaliacoes[$iHar] $colunaHar) (Get-ObjectValue $avaliacoesHar[$iHar] $colunaHar)
+                }
+            }
+            Assert-Equal 0 $script:ChamadasRedeHar
+        }
+    }
+    finally { Remove-Item -LiteralPath Function:\Invoke-WebRequest }
+
     Test-Case 'API decodifica a transformacao publicada pelo JavaScript Dell' {
         $rot = New-Object Text.StringBuilder
         foreach ($ch in $siteJson.ToCharArray()) {

@@ -7,7 +7,7 @@ Script PowerShell para apoiar a análise de atualizações em servidores Dell Po
 Você executa o mesmo script em cada servidor. **Ele identifica automaticamente a Service Tag, o modelo e o Windows Server instalado**, normalmente sem precisar preencher ou editar essas informações.
 
 1. Identifica a Service Tag, o modelo e o Windows Server da própria máquina.
-2. Consulta os downloads Dell pelo **modelo e sistema operacional instalado**. A Service Tag identifica o servidor no relatório, mas não é enviada nessa consulta padrão.
+2. Consulta os downloads Dell pelo **modelo e sistema operacional instalado**, ou lê um HAR salvo manualmente do navegador com `-ArquivoSiteDell`. A Service Tag identifica o servidor no relatório, mas não é enviada na consulta automática padrão.
 3. Coleta ou carrega o inventário do DSU, compara as versões e gera o relatório de pendências identificadas, sinalizando os casos inconclusivos.
 
 O modelo é identificado automaticamente e validado na resposta. Exemplos:
@@ -20,6 +20,8 @@ O modelo é identificado automaticamente e validado na resposta. Exemplos:
 
 **O padrão voltou a ser modelo + sistema operacional (`-ConsultaSite Modelo`).** Execute o script sem parâmetros para usar esse fluxo. A consulta por tag permanece somente como opção experimental explícita (`-ConsultaSite ServiceTag`); ela não é executada no modo padrão.
 
+**Alternativa manual, sem complemento de navegador:** abra o site Dell pela Service Tag, selecione o Windows correto e exporte um arquivo **HAR sanitizado** pela guia Rede do Edge ou Chrome. O parâmetro `-ArquivoSiteDell` usa esse arquivo no lugar da consulta HTTP do script. Não é necessário copiar cada atualização ou baixar seus pacotes. Consulte o [passo a passo de importação manual](docs/Importacao-Manual-Dell.md).
+
 **Situação da validação: consulta por tag experimental e sem sucesso online confirmado.** O fluxo foi testado com HTTP simulado, mas a tentativa online retornou HTTP 403 neste ambiente e uma execução posterior no servidor também foi recusada. Não há uma correção de acesso validada. O teste anterior bem-sucedido de 352 registros foi por modelo, não por tag. Consulte os detalhes e evidências da seção 3.
 
 Os detalhes técnicos, as regras de comparação e suas limitações estão nas seções seguintes. A [pesquisa de alternativas para consulta por Service Tag](docs/Pesquisa-ServiceTag.md) avalia coleta no navegador, APIs, ferramentas Dell e uma proposta de validação, sem presumir que o bloqueio HTTP tenha sido resolvido.
@@ -30,7 +32,7 @@ Este é um script próprio. As fontes de downloads e os comandos do DSU são da 
 
 ## 1. Executar no servidor
 
-Requisitos: Windows PowerShell **5.1**, sessão de **administrador**, acesso HTTPS à Dell e **Dell System Update (DSU)** instalado para uma coleta nova. A [documentação Dell do DSU][dsu] descreve a ferramenta e seus requisitos; a compatibilidade do DSU deve ser conferida para o modelo e o Windows Server usados.
+Requisitos: Windows PowerShell **5.1**, sessão de **administrador** e **Dell System Update (DSU)** instalado para uma coleta nova. A consulta automática exige acesso HTTPS à Dell; a alternativa com `-ArquivoSiteDell` lê localmente a referência salva no navegador. O próprio DSU pode precisar de rede para coletar o inventário. A [documentação Dell do DSU][dsu] descreve a ferramenta e seus requisitos; a compatibilidade do DSU deve ser conferida para o modelo e o Windows Server usados.
 
 Copie apenas `Gerar-RelatorioDell.ps1` para uma pasta local do servidor, abra o Windows PowerShell como administrador, entre nessa pasta e execute:
 
@@ -56,6 +58,24 @@ Para reaproveitar um inventário já coletado **neste mesmo servidor**:
 
 O arquivo importado precisa conter a mensagem `Exiting DSU!`. A validação atual verifica a presença dessa mensagem e a interpretação das linhas numeradas; não comprova a identidade da máquina nem a atualidade da coleta. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
 
+### Alternativa manual: downloads salvos do navegador
+
+Exporte o HAR conforme o [guia de captura](docs/Importacao-Manual-Dell.md), copie o arquivo para o servidor e execute:
+
+```powershell
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har'
+```
+
+Para reutilizar também o inventário já concluído deste servidor:
+
+```powershell
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+```
+
+O script identifica produto e SO da captura, confere sua correspondência com o servidor e lê os metadados dos downloads. O modo padrão continua sendo **Modelo**: usa a lista ampla do modelo, mesmo se a resposta tiver sido obtida por um endpoint de tag. Abrir uma página pela tag não comprova que todos os registros listados sejam aplicáveis ao hardware atual. Na imagem usada como referência, a aba **All PowerEdge R530** indica a lista ampla; o Windows Server 2012 R2 selecionado ali deve ser trocado se o servidor executar Windows Server 2016.
+
+Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O HAR deve conter a resposta de downloads; o script rejeita ausência de corpo, contexto errado, lista vazia, dados inválidos ou respostas ambíguas. Esse fluxo não refaz a consulta HTTP. Um HAR inválido não causa uma tentativa automática de consultar outra fonte.
+
 ## 2. Como funciona a engine
 
 O padrão é `-Fonte Site`. As etapas acontecem **em sequência**, na própria máquina:
@@ -64,8 +84,11 @@ O padrão é `-Fonte Site`. As etapas acontecem **em sequência**, na própria m
 flowchart TD
     A[Preparar saida e log] --> B[Verificar administrador e ler identificacao por CIM]
     B --> C[Identificar modelo e Windows Server]
-    C --> D[Consultar downloads Dell pelo modelo e Windows Server instalado]
-    D --> E{Inventario informado?}
+    C --> D{ArquivoSiteDell informado?}
+    D -->|Sim| J[Ler e validar downloads do HAR local]
+    D -->|Nao| K[Consultar downloads Dell pelo modelo e Windows instalado]
+    J --> E{Inventario informado?}
+    K --> E
     E -->|Sim| F[Ler e validar arquivo existente]
     E -->|Nao| G[Consultar ajuda e executar DSU --inventory]
     F --> H[Aplicar regras locais de associacao e comparar versoes]
@@ -82,15 +105,19 @@ flowchart TD
 | Modelo | `Win32_ComputerSystem.Model`, por CIM local |
 | Windows Server instalado | `Win32_OperatingSystem.Caption` e `ProductType` |
 | Componentes e versões instaladas | Texto de `DSU.exe --inventory`, ou arquivo importado |
-| Versões publicadas, criticidade, data e pacote | Interface interna de Drivers & Downloads no site Dell |
+| Versões publicadas, criticidade, data e pacote | Interface interna de Drivers & Downloads no site Dell, consultada por HTTP ou lida da resposta salva no HAR |
 
 **A consulta padrão ao site usa modelo + sistema operacional**, identificados localmente. O script chama `packdriversbyproduct` e compara os downloads recebidos com o inventário atual. A Service Tag, lida de `Win32_BIOS.SerialNumber`, é incluída no relatório e no log, mas não é enviada nessa consulta.
 
-Somente ao informar `-ConsultaSite ServiceTag`, o script tenta abrir o endereço Dell da tag e extrair o identificador fornecido na URL canônica ou no contexto da página. O JavaScript Dell chama esse valor de `encryptedServiceTag`; o script não tenta gerá-lo nem descriptografá-lo. Em seguida, envia esse identificador a `packdriversbytag`, mantendo modelo e SO como parâmetros de contexto. Esse fluxo é experimental e tem bloqueio HTTP 403 observado.
+Com `-ArquivoSiteDell`, a consulta HTTP é substituída pela leitura local da resposta do HAR. O importador valida a origem Dell, o produto e o SO solicitados, o status HTTP e o conteúdo da resposta; aceita texto, base64 e a transformação de resposta já usada pelo site. A seleção de escopo continua sendo definida por `-ConsultaSite`. `Modelo` não exige tag nem aplica o filtro de tag, e esse escopo fica registrado nos metadados da fonte.
+
+Ao informar `-ConsultaSite ServiceTag` **sem HAR**, o script tenta abrir o endereço Dell da tag e extrair o identificador fornecido na URL canônica ou no contexto da página. O JavaScript Dell chama esse valor de `encryptedServiceTag`; o script não tenta gerá-lo nem descriptografá-lo. Em seguida, envia esse identificador a `packdriversbytag`, mantendo modelo e SO como parâmetros de contexto. Esse fluxo automático é experimental e tem bloqueio HTTP 403 observado.
 
 O código do SO é derivado do Windows do servidor, e não do filtro escolhido em um navegador de outra máquina. Exemplos do mapeamento implementado: 2012 R2 → `W12R2`, 2016 → `WST14`, 2019 → `WS19L`, 2022 → `WS22L` e 2025 → `WS25L`.
 
-No modo experimental por tag, o fluxo exige confirmação `IsTag = true`, identidade correspondente à tag/identificador consultado, ausência do sinal de falta de dados por tag e marcações válidas `IsTagDriver`. **Nesse modo, só registros com `IsTagDriver > 0` entram na comparação.** A lista ampla pode vir na mesma resposta, mas não é usada como substituição silenciosa. Uma consulta por tag também não comprova que os componentes originais continuem instalados; o inventário atual permanece necessário.
+No modo automático experimental por tag, o fluxo exige confirmação `IsTag = true`, identidade correspondente à tag/identificador consultado, ausência do sinal de falta de dados por tag e marcações válidas `IsTagDriver`. **Nesse modo, só registros com `IsTagDriver > 0` entram na comparação.** A lista ampla pode vir na mesma resposta, mas não é usada como substituição silenciosa. Uma consulta por tag também não comprova que os componentes originais continuem instalados; o inventário atual permanece necessário.
+
+Na importação manual com `-ConsultaSite ServiceTag`, a identidade exigida é a **Service Tag em texto claro na resposta, igual à lida do BIOS**. Apenas um identificador opaco na URL ou na resposta não comprova essa correspondência. Se a captura não trouxer essa identidade ou os dados marcados para tag, a importação estrita falha; é possível escolher explicitamente `-ConsultaSite Modelo` para usar a referência ampla, sem alegar validação por tag.
 
 Sem arquivo importado, o script localiza o DSU, executa `--help`, confere a opção `--inventory` e coleta o inventário. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. A Dell documenta o [inventário do DSU e a exportação de informações][inventario-dsu].
 
@@ -235,7 +262,9 @@ O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e 
 
 No modo Site, a linha **“Nenhuma atualização pendente”** exige ausência de pendências e de registros inconclusivos no inventário em escopo. Ela continua limitada ao que foi inventariado e à referência consultada; não é uma certificação de atualização completa do servidor.
 
-O diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodificada), `downloads-site.json` (registros efetivamente usados; filtrados por tag somente no modo experimental `ServiceTag`), `fonte-site.txt`, os textos de ajuda/inventário concluídos ou o arquivo importado. A fonte registra o tipo de consulta e as quantidades recebida/usada; o log registra horários, etapas e contagens. As saídas brutas de um processo só são gravadas depois do encerramento do processo e da captura dos pipes; podem não existir em uma falha por timeout.
+No modo automático, o diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodificada), `downloads-site.json` (registros efetivamente usados; filtrados por tag somente no modo experimental `ServiceTag`), `fonte-site.txt`, os textos de ajuda/inventário concluídos ou o arquivo importado. A fonte registra o tipo de consulta e as quantidades recebida/usada; o log registra horários, etapas e contagens. As saídas brutas de um processo só são gravadas depois do encerramento do processo e da captura dos pipes; podem não existir em uma falha por timeout.
+
+No modo manual, o diagnóstico preserva os downloads normalizados utilizados e os metadados da importação, com caminho local, hash SHA256 do HAR, data/hora e contagem. **O HAR inteiro, cookies e os demais registros de navegação não são copiados para o diagnóstico.** O arquivo original continua no local em que o analista o salvou. A sanitização do navegador não elimina necessariamente tags, URLs e dados presentes nos corpos das respostas; mantenha as capturas com os arquivos operacionais do cliente, fora do repositório.
 
 **Confira o término bem-sucedido no log.** O CSV principal é escrito antes do CSV de verificação; uma falha posterior de escrita pode deixar um arquivo principal criado mesmo com erro na execução.
 
@@ -244,10 +273,11 @@ O diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodifi
 | Parâmetro | Padrão / uso |
 | --- | --- |
 | `-Fonte` | `Site`. `Catalogo` usa o fluxo de preview explicado abaixo. |
-| `-ConsultaSite` | `Modelo` (padrão): modelo + Windows instalado. `ServiceTag` é uma opção experimental explícita, ainda bloqueada nos testes online. Só se aplica a `-Fonte Site`. |
+| `-ConsultaSite` | `Modelo` (padrão): lista ampla para modelo + Windows instalado. `ServiceTag` exige dados por tag; com HAR, exige ainda a tag clara correspondente ao BIOS. A consulta HTTP por tag segue experimental e bloqueada nos testes online. Só se aplica a `-Fonte Site`. |
 | `-CaminhoSaida` | Subpasta `Relatorios` junto do script; aceita pasta local ou UNC. |
 | `-CaminhoDSU` | Descoberta de `dsu.exe` no PATH e em pastas Dell conhecidas. Permite caminho completo explícito. |
 | `-ArquivoInventario` | Reutiliza um texto do DSU do mesmo servidor. Somente com `-Fonte Site`. |
+| `-ArquivoSiteDell` | Caminho local ou UNC de um HAR sanitizado exportado do Edge/Chrome, com a resposta de downloads. Substitui a consulta HTTP; somente com `-Fonte Site`. Incompatível com `-Catalogo` e `-Fonte Catalogo`. |
 | `-CodigoProduto` | Derivado do modelo. Permite informar um código conferido na URL Dell, como `poweredge-r530`. |
 | `-CodigoSO` | Derivado do Windows instalado. Permite informar um código conferido no site. |
 | `-Catalogo` | URL HTTPS ou arquivo XML/GZip local/UNC. Informá-lo sem `-Fonte` seleciona o modo `Catalogo`. |
@@ -258,6 +288,8 @@ O DSU em execução gera um aviso de espera a cada 15 segundos. Ao atingir o lim
 Falhas como falta de administrador, DSU ausente, rede/API inacessível, HTTP 403/429, resposta vazia ou diferente do schema, produto incompatível e linhas de inventário não interpretadas geram erro. Elas não são tratadas como ausência de atualizações. Não há fallback silencioso para outra referência.
 
 O script usa `packdriversbyproduct` por padrão. Se a opção experimental por tag for escolhida e falhar, não há troca automática para modelo. O tipo de consulta aparece no log e em `fonte-site.txt`.
+
+Com `-ArquivoSiteDell`, nenhuma chamada HTTP é feita para obter os downloads. Arquivo inválido, truncado, sem corpo, com produto/SO errado ou com contexto ambíguo gera erro. O importador não executa scripts da página, não segue URLs do HAR e não baixa os pacotes listados. O significado de cada campo e a captura correta estão no [guia da importação manual](docs/Importacao-Manual-Dell.md).
 
 ### HTTP 403 na consulta por Service Tag
 
@@ -280,6 +312,8 @@ Para ajustar uma diferença de formato entre versões, revise os arquivos brutos
 | `Get-DellProductCode` / `Get-DellOsCode` | Identificação dos parâmetros de consulta. |
 | `Get-DellSiteDownloads` / `ConvertFrom-DellSiteResponse` | HTTP, transformação, validação e preservação da resposta. |
 | `Get-DellTagContext` / `Get-DellTagToken` | Obtenção do identificador fornecido na página Dell por tag, sem executar scripts remotos. |
+| `Get-DellSiteReference` / `Import-DellSiteHar` | Seleção entre consulta online e leitura local de HAR; validação de modelo, SO, respostas e metadados de captura. |
+| `Get-DellHarRequestContext` / `ConvertTo-DellHarReference` | Identificação das requisições Dell e preservação apenas dos campos usados na comparação. |
 | `ConvertFrom-DsuInventoryText` / `Get-ValidatedInventory` | Leitura de `N. [TIPO, ]Componente ( Version : versão )` e conferência das linhas. |
 | `New-SiteAssessmentRows` | Regras locais de associação. É o ponto para ampliar cobertura com evidência e testes. |
 | `Compare-DottedVersion` | Comparação de segmentos numéricos. |
@@ -311,6 +345,9 @@ O modo Catalogo gera o CSV principal, log e diagnóstico; não gera o `_Verifica
 Gerar-RelatorioDell.ps1              # necessário para execução
 README.md                           # operação, engine e referências
 .gitignore                          # saídas e arquivos transitórios
+docs/
+  Importacao-Manual-Dell.md          # captura HAR no navegador e importação
+  Pesquisa-ServiceTag.md            # avaliação das alternativas
 docs/evidencias/
   api-dell-2026-10-28.json            # registro da verificação online
   api-dell-service-tag-2026-10-28.json # contrato observado, HTTP 403 e testes por tag
@@ -330,7 +367,9 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **60 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **80 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+
+Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. Esses testes não substituem a validação de uma captura HAR real do navegador do usuário.
 
 O caso real anterior de R530, comparado **pela consulta por modelo**, com identificadores removidos e versões preservadas, produziu 25 registros: seis aplicativos excluídos, duas pendências identificadas, um componente na versão publicada e 16 inconclusivos. Isso não comprova a mesma seleção na consulta por tag. As referências públicas usadas foram:
 
@@ -340,7 +379,7 @@ O caso real anterior de R530, comparado **pela consulta por modelo**, com identi
 | PERC H730P Mini | 25.5.3.0005 | [25.5.9.0001 / 700GG][perc-h730p] | Recomendado |
 | iDRAC | 2.86.86.86 | [2.86.86.86 / VWF72][idrac8] | Recomendado; mesma versão |
 
-A consulta online de 352 registros é evidência da fonte por modelo naquele momento. Os testes offline usam um recorte fixo de seis registros reais e acrescentam campos de tag sintéticos em memória para testar o novo fluxo; não são uma resposta online real por tag. A consulta por tag de ponta a ponta, a execução completa com CIM/DSU e a decisão de atualizar cada pacote ainda precisam de validação no servidor alvo.
+A consulta online de 352 registros é evidência da fonte por modelo naquele momento. Os testes offline usam um recorte fixo de seis registros reais e acrescentam campos de tag sintéticos em memória para testar o novo fluxo; não são uma resposta online real por tag. Os casos de importação manual usam HARs sintetizados para verificar seleção e rejeição de capturas inadequadas. **Ainda não foi fornecido um HAR real do navegador do usuário para validar esse fluxo de ponta a ponta.** A consulta por tag, a importação real, a execução completa com CIM/DSU e a decisão de atualizar cada pacote precisam de validação no servidor alvo.
 
 ## Referências Dell
 

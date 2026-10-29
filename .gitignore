@@ -5,6 +5,7 @@
 /DSU_*.log
 /DSU_*.csv.tmp
 /DSU_*_diagnostico/
+*.har
 
 # Cópias transitórias e diretórios exclusivos dos testes.
 /backup_antes_API_*/
