@@ -905,7 +905,7 @@ function Get-SiteInventoryArguments {
 function Get-DellDiskRule {
     param($Instalado)
     # Regras locais restritas à identidade observada e ao pacote Dell verificado.
-    # O DSU pode truncar o modelo Seagate em 18 caracteres: CID e FQDD são exigidos.
+    # O coletor observado abrevia o modelo Seagate: CID e FQDD são exigidos.
     if ($Instalado.Tipo -ne 'FRMW' -or ([string](Get-ObjectValue $Instalado 'FQDD')) -notmatch '^Disk\.Bay\.\d+:') { return $null }
     $modeloDisco = [string](Get-ObjectValue $Instalado 'ModeloDispositivo')
     $cid = [string](Get-ObjectValue $Instalado 'ComponentID')
