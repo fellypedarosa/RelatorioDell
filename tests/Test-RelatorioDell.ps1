@@ -918,10 +918,10 @@ Getting System Inventory ...
         Assert-Equal 1 @(Get-SiteInventoryArguments -Ajuda '--inventory --output-inventory-xml-other' -ArquivoXml X).Count
         Assert-Throws { Get-SiteInventoryArguments -Ajuda '--preview --output-inventory-xml=<FILE>' -ArquivoXml X }
     }
-    Test-Case 'Discos com identidade XML reduzem quatro inconclusivos preservando as baias' {
+    Test-Case 'Discos e NICs com identidade XML preservam baias e identificadores completos' {
         Assert-Equal 19 $avaliacoesXml.Count
-        Assert-Equal 5 @($avaliacoesXml | Where-Object Status -eq Pendente).Count
-        Assert-Equal 12 @($avaliacoesXml | Where-Object Status -eq Inconclusivo).Count
+        Assert-Equal 11 @($avaliacoesXml | Where-Object Status -eq Pendente).Count
+        Assert-Equal 6 @($avaliacoesXml | Where-Object Status -eq Inconclusivo).Count
         Assert-Equal 2 @($avaliacoesXml | Where-Object Status -eq 'Atualizado na referência').Count
         $r = @($avaliacoesXml | Where-Object { $_.FQDD -like 'Disk.Bay.*' })
         Assert-Equal 'Pendente' $r[0].Status
@@ -973,19 +973,20 @@ Getting System Inventory ...
         $r = @(New-SiteAssessmentRows @($discosXml[0]) @($copia) X Y Z WST14)
         Assert-Equal '' $r[0].NomeDoPacote
     }
-    Test-Case 'NIC com PCI IDs e fonte com ComponentID nao ganham regra por suposicao' {
+    Test-Case 'NICs exigem perfil PCI validado e fontes continuam inconclusivas' {
         $r = @($avaliacoesXml | Where-Object { $_.VendorID -eq '14E4' -or $_.ComponentID -eq '101095' })
         Assert-Equal 8 $r.Count
-        foreach ($item in $r) { Assert-Equal 'Inconclusivo' $item.Status }
+        Assert-Equal 6 @($r | Where-Object Status -eq Pendente).Count
+        Assert-Equal 2 @($r | Where-Object Status -eq Inconclusivo).Count
     }
     Test-Case 'CSV XML mantem dez colunas e auditoria inclui modelo baia e PCI IDs' {
         $arquivo = Join-Path $pastaTeste 'xml.csv'
         Export-SiteAssessment $avaliacoesXml $arquivo X Y Z
         $principal = @(Import-Csv -LiteralPath $arquivo -Delimiter ';' -Encoding UTF8)
-        Assert-Equal 6 $principal.Count
+        Assert-Equal 12 $principal.Count
         Assert-Equal 10 @($principal[0].PSObject.Properties).Count
         Assert-Equal 'Urgente' $principal[0].Criticidade
-        Assert-True ($principal[-1].Componente -like 'Verificação parcial: 12*')
+        Assert-True ($principal[-1].Componente -like 'Verificação parcial: 6*')
         $auditoria = @(Import-Csv -LiteralPath (Join-Path $pastaTeste 'xml_Verificacao.csv') -Delimiter ';' -Encoding UTF8)
         Assert-Equal 19 $auditoria.Count
         Assert-Equal 'MG04SCA20ENY' $auditoria[6].ModeloDispositivo
@@ -1029,6 +1030,130 @@ Getting System Inventory ...
         }
     }
     finally { ${function:Invoke-DsuReadOnly} = $wrapperOriginal }
+
+    # Evidências CIM sintéticas: versões hipotéticas, sem afirmar estado do cliente.
+    $driversTeste = @()
+    $numero = 0
+    foreach ($nic in @($xmlInventario | Where-Object VendorID -eq '14E4')) {
+        $numero++
+        $driversTeste += [pscustomobject]@{
+            PnpDeviceID=('PCI\VEN_14E4&DEV_165F&SUBSYS_' + $nic.SubDeviceID + $nic.SubVendorID + '\TESTE' + $numero)
+            Nome=('NIC TESTE ' + $numero); VendorID=$nic.VendorID; DeviceID=$nic.DeviceID
+            SubVendorID=$nic.SubVendorID; SubDeviceID=$nic.SubDeviceID
+            Versao='214.0.0.5'; Provedor='Broadcom Corporation'; InfName='oem10.inf'; Assinado=$true
+        }
+    }
+    $jsonDrivers = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\dell-r530-broadcom-driver.json'))
+    $siteDriver = ConvertFrom-DellSiteResponse -Texto $jsonDrivers -Produto poweredge-r530
+    $downloadsDrivers = @($downloadsXml) + @($siteDriver.DriverListData)
+    $familia = @($xmlInventario | Where-Object ComponentID -eq '8641')[0]
+
+    Test-Case 'Firmware Broadcom usa tupla completa e FFV sem misturar NetXtreme-E' {
+        $r = @($avaliacoesXml | Where-Object VendorID -eq '14E4')
+        Assert-Equal 6 $r.Count
+        foreach ($nic in $r) {
+            Assert-Equal '22.00.6' $nic.VersaoNova
+            Assert-Equal '20.06.18' $nic.VersaoAtual
+            Assert-True ($nic.NomeDoPacote -like '*DFF48*')
+            Assert-True ($nic.Motivo -match '2016 não consta')
+        }
+        $copia = @($xmlInventario | Where-Object VendorID -eq '14E4')[0].PSObject.Copy()
+        foreach ($campo in @('VendorID','DeviceID','SubVendorID','SubDeviceID')) {
+            $outra = $copia.PSObject.Copy(); $outra.$campo='FFFF'
+            $r = @(New-SiteAssessmentRows @($outra) $downloadsDrivers X Y Z WST14)
+            Assert-Equal 'Inconclusivo' $r[0].Status
+        }
+    }
+    Test-Case 'Firmware Broadcom nao aceita pacote ausente alvo alterado ou versao interna' {
+        $nic = @($xmlInventario | Where-Object VendorID -eq '14E4')[0].PSObject.Copy()
+        $r = @(New-SiteAssessmentRows @($nic) @($siteDriver.DriverListData) X Y Z WST14)
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        $pacote = @($downloadsXml | Where-Object DriverId -eq DFF48)[0].PSObject.Copy()
+        $pacote.DellVer='23.00.1, A00'
+        $r = @(New-SiteAssessmentRows @($nic) @($pacote) X Y Z WST14)
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        $nic.Versao='1.39'
+        $r = @(New-SiteAssessmentRows @($nic) $downloadsDrivers X Y Z WST14)
+        Assert-Equal 'Inconclusivo' $r[0].Status
+    }
+    Test-Case 'CIM completo substitui zero de familia pelo driver NDIS efetivo' {
+        $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $driversTeste)
+        $driver = @($r | Where-Object ComponentID -eq '8641')[0]
+        Assert-Equal 'Pendente' $driver.Status
+        Assert-Equal '214.0.0.5' $driver.VersaoAtual
+        Assert-Equal '214.0.0.6' $driver.VersaoNova
+        Assert-Equal '0.0.0' $driver.VersaoDSU
+        Assert-Equal '6' $driver.QuantidadeDispositivosDriver
+        Assert-Equal 'oem10.inf' $driver.InfName
+        Assert-True ($driver.FonteVersao -match 'NDIS')
+        Assert-True ($driver.NomeDoPacote -like '*49X84*21.80.3*')
+        Assert-Equal 5 @($r | Where-Object Status -eq Inconclusivo).Count
+    }
+    Test-Case 'Driver NDIS igual ou acima da referencia nao gera downgrade' {
+        foreach ($versao in @('214.0.0.6','215.0.0.0')) {
+            $evidencias = @($driversTeste | ForEach-Object {$c=$_.PSObject.Copy(); $c.Versao=$versao; $c})
+            $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $evidencias)
+            $driver = @($r | Where-Object ComponentID -eq '8641')[0]
+            $esperado = if($versao -eq '214.0.0.6'){'Atualizado na referência'}else{'Acima da referência'}
+            Assert-Equal $esperado $driver.Status
+        }
+    }
+    Test-Case 'Driver CIM parcial duplicado sem assinatura ou Microsoft permanece inconclusivo' {
+        Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario @()).Valido)
+        Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario $driversTeste[0..4]).Valido)
+        foreach ($campo in @('Assinado','Provedor','Versao','PnpDeviceID','SubDeviceID')) {
+            $evidencias = @($driversTeste | ForEach-Object {$_.PSObject.Copy()})
+            switch ($campo) {
+                Assinado {$evidencias[0].Assinado=$false}
+                Provedor {$evidencias[0].Provedor='Microsoft'}
+                Versao {$evidencias[0].Versao='0.0.0.0'}
+                PnpDeviceID {$evidencias[0].PnpDeviceID=$evidencias[1].PnpDeviceID}
+                SubDeviceID {$evidencias[0].SubDeviceID='FFFF'}
+            }
+            Assert-True (-not (Get-BroadcomInstalledDriver $xmlInventario $evidencias).Valido)
+        }
+    }
+    Test-Case 'Drivers de versoes diferentes nao sao resumidos por escolha arbitraria' {
+        $evidencias = @($driversTeste | ForEach-Object {$_.PSObject.Copy()})
+        $evidencias[0].Versao='214.0.0.6'
+        $r = Get-BroadcomInstalledDriver $xmlInventario $evidencias
+        Assert-True (-not $r.Valido)
+        Assert-True ($r.Motivo -match 'diferentes')
+    }
+    Test-Case 'Driver 49X84 exige versao de familia e Windows validados' {
+        $pacote = $siteDriver.DriverListData[0].PSObject.Copy()
+        $pacote.DellVer='22.00.1, A00'
+        $r = @(New-SiteAssessmentRows $xmlInventario @($pacote) X Y Z WST14 -DriversWindows $driversTeste)
+        Assert-Equal 'Inconclusivo' @($r | Where-Object ComponentID -eq '8641')[0].Status
+        $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WS25L -DriversWindows $driversTeste)
+        Assert-Equal 'Inconclusivo' @($r | Where-Object ComponentID -eq '8641')[0].Status
+    }
+    Test-Case 'Sem CIM real o reprocessamento de XML nao inventa versao de driver' {
+        $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14)
+        $driver = @($r | Where-Object ComponentID -eq '8641')[0]
+        Assert-Equal 'Inconclusivo' $driver.Status
+        Assert-Equal '0.0.0' $driver.VersaoAtual
+        Assert-Equal 6 @($r | Where-Object Status -eq Inconclusivo).Count
+    }
+    Test-Case 'Coleta CIM usa apenas NET e preserva somente perfis PCI implementados' {
+        $script:ClasseCimTeste=''; $script:FiltroCimTeste=''
+        $script:DriversCimTeste=@(
+            [pscustomobject]@{DeviceID='PCI\VEN_14E4&DEV_165F&SUBSYS_06391028&REV_01\EXEMPLO';DeviceName='Broadcom';DriverVersion='214.0.0.5';DriverProviderName='Broadcom';InfName='oem10.inf';IsSigned=$true},
+            [pscustomobject]@{DeviceID='ROOT\VMS_MP\0000';DeviceName='Virtual'},
+            [pscustomobject]@{DeviceID='PCI\VEN_8086&DEV_1234&SUBSYS_12341028\OUTRO';DeviceName='Outro'}
+        )
+        function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) $script:ClasseCimTeste=$ClassName; $script:FiltroCimTeste=$Filter; if($OperationTimeoutSec -ne 30){throw 'Timeout CIM incorreto.'}; $script:DriversCimTeste}
+        try {
+            $r = @(Get-DellWindowsNetworkDrivers)
+            Assert-Equal 'Win32_PnPSignedDriver' $script:ClasseCimTeste
+            Assert-Equal "DeviceClass='NET'" $script:FiltroCimTeste
+            Assert-Equal 1 $r.Count
+            Assert-Equal '1028' $r[0].SubVendorID
+            Assert-Equal '0639' $r[0].SubDeviceID
+            Assert-Equal '214.0.0.5' $r[0].Versao
+        }
+        finally {Remove-Item Function:\Get-CimInstance}
+    }
 
     Test-Case 'Wrapper nativo captura stdout e stderr e encerra sem pipe bloqueado' {
         $script:Diagnostico = $pastaTeste

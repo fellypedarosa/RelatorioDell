@@ -35,7 +35,15 @@ O JSON contém somente os dois pacotes RG9MK e P183W, extraídos dos downloads n
 
 O coletor registra o Seagate como `ST8000NM023B-2TJ`, abreviação do modelo completo `ST8000NM023B-2TJ133` na página Dell. O código aceita apenas esses dois textos exatos, junto com ComponentID `111175` e FQDD de disco. Para Toshiba, exige `MG04SCA20ENY`, ComponentID `105266` e FQDD de disco. Esses IDs foram observados no XML; não são um contrato de associação publicado pela API.
 
-A regressão XML usa os seis registros anteriores mais os dois discos: mantém 19 itens em escopo e resulta em cinco pendências, dois atualizados na referência e 12 inconclusivos. Os pares EG02/EG03 e LA0B/LA0C são regras locais explícitas, sem ordenação alfabética. Isso testa a associação implementada, sem executar DUPs ou certificar aplicabilidade. Os originais XML/HAR e relatórios do cliente não são versionados.
+Na primeira implementação, a regressão XML com os seis registros anteriores mais os dois discos mantinha 19 itens em escopo, cinco pendências, dois atualizados na referência e 12 inconclusivos. O resultado posterior com regras Broadcom está descrito abaixo. Os pares EG02/EG03 e LA0B/LA0C são regras locais explícitas, sem ordenação alfabética. Isso testa a associação implementada, sem executar DUPs ou certificar aplicabilidade. Os originais XML/HAR e relatórios do cliente não são versionados.
+
+## dell-r530-broadcom-driver.json e regressões Broadcom
+
+O novo JSON contém somente o pacote 49X84 do mesmo HAR R530/WST14 com 323 downloads, preservando os metadados normalizados. A versão de família é `21.80.3`, distinta do driver NDIS `214.0.0.6` nas [notas oficiais](https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt). Os pacotes DFF48/49X84 foram extraídos estaticamente; identidades PCI, hashes e limites estão em [evidência Broadcom](../../docs/evidencias/broadcom-2026-10-29.json). Não são distribuídos binários ou scripts de terceiros extraídos do DUP.
+
+As tuplas `14E4:165F:14E4:2003` e `14E4:165F:1028:0639` estão nos dois `package.xml`. A coluna de família de `bcmnxfw.cfg` associa ambas à FFV `22.00.6`. Assim, a regressão XML passa a produzir 11 pendências, dois atualizados na referência e seis inconclusivos. A ressalva de suporte ao Windows 2016 do DFF48 permanece no motivo; comparação de versão não valida execução do instalador.
+
+As seis linhas CIM são construídas **em memória com versões e identidades fictícias**; não são uma coleta real do servidor. A versão `214.0.0.5` é um exemplo sintético para exercitar pendência; a versão alvo `214.0.0.6` vem das notas oficiais. Assinatura/provedor dos fixtures são simulados. Com esse cenário, o driver de família deixa de ser inconclusivo; sem evidência CIM, continua inconclusivo. Nenhum teste consulta Windows Update ou driver real da máquina que executa a suíte.
 
 ## Casos por Service Tag
 
