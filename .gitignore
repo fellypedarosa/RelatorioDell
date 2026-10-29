@@ -12,3 +12,5 @@
 /tests/temporario_*/
 /.tmp/
 /InventarioDell*.xml
+/CacheDell/
+/CachePacotes/

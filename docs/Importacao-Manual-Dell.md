@@ -56,7 +56,7 @@ Prefira o XML `SVMInventory`: ele preserva modelos físicos e identificadores qu
 
 Para definir a pasta de relatórios, acrescente `-CaminhoSaida 'C:\RelatoriosDell'` ou o caminho UNC desejado. Não combine `-ArquivoSiteDell` com `-Catalogo` ou `-Fonte Catalogo`: isso gera erro.
 
-O script não refaz a consulta de downloads ao site quando o HAR foi informado. O próprio DSU pode usar a rede para obter seu coletor de inventário; com inventário importado, essa nova coleta não é necessária.
+O script não refaz a consulta da lista ao site quando o HAR foi informado. A análise automática seguinte pode baixar os DUPs pelos links oficiais e SHA256 do HAR, para extrair seus metadados. Para desligá-la, acrescente `-AnalisePacotes Desativada`. Consulte a seção de análise automática no README. O próprio DSU pode usar a rede para obter seu coletor de inventário; com inventário importado, essa nova coleta não é necessária.
 
 ## O que significa abrir a página pela Service Tag
 
@@ -76,7 +76,7 @@ Esse filtro também não substitui o inventário do hardware atual: um component
 
 ## Validações e erros
 
-O importador não executa código da página, não segue URLs do HAR e não baixa pacotes. Ele lê as entradas locais, reconhece a resposta Dell, confere produto e SO e trata a resposta em texto ou base64, incluindo a transformação de letras usada pela interface Dell.
+O importador não executa código da página. A análise automática posterior aceita somente URLs oficiais de arquivos e exige hash e assinatura Dell antes de extrair; não usa os demais acessos registrados no HAR. Ele lê as entradas locais, reconhece a resposta Dell, confere produto e SO e trata a resposta em texto ou base64, incluindo a transformação de letras usada pela interface Dell.
 
 | Situação | Como proceder |
 | --- | --- |

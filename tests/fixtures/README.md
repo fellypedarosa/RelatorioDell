@@ -53,6 +53,14 @@ A engine aceita esse provedor por hardware, assinatura indicada pelo CIM e refer
 
 Os testes com outros nomes de PowerEdge, outro fabricante/pacote, versões diferentes, números variáveis de interfaces e identidades divergentes são **sintéticos**. Demonstram que a lógica não usa R530, hostname, tag, versão 17.2.1.0, INF específico ou provedor como condição. Não comprovam suporte físico a todos esses servidores ou pacotes. A base de produção ainda contém somente o driver 49X84; outros pacotes exigem dados revisados, não novas condições por modelo na engine.
 
+## pacote-auto/package.xml e pacote-auto/rede.inf
+
+São arquivos **inteiramente sintéticos**, sem pacote executável ou assinatura real. O manifesto imita `SoftwareComponent` schema 1.0; o INF demonstra `DriverVer`, `Manufacturer`, modelos PCI e decorações amd64/build. IDs `A1B2C`, `9000` e `8086:1234:1028:ABCD` são dados de teste, não uma afirmação de produto suportado pela Dell.
+
+O teste positivo extrai definições desses arquivos e compara com CIM sintético de versão inferior, sem uma referência fixa do pacote na engine. Outros casos recusam DTD, identidades divergentes, INFs ausentes, revisões/overrides não resolvidos e versões inválidas. Nos testes de cache, funções de rede, assinatura e extração são substituídas; não se inicia um DUP, instalador, Windows Update ou processo de fornecedor.
+
+As evidências de leitura dos DUPs reais são separadas em [pacotes-automaticos-2026-10-29.json](../../docs/evidencias/pacotes-automaticos-2026-10-29.json). Binários e extrações reais não integram o repositório.
+
 ## Casos por Service Tag
 
 Os campos `IsTag`, `ServiceTag`, `IsNoDriversFoundForTag` e `IsTagDriver` usados nos novos testes são **sintéticos**, acrescentados em memória pelo harness. A tag `ABC1234` e o identificador `0-TOKEN_SINTETICO_1234567890` são exemplos fictícios. Não representam uma consulta real por tag nem uma contagem validada online.

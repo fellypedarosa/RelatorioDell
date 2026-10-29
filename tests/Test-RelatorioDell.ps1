@@ -1137,7 +1137,7 @@ Getting System Inventory ...
         Assert-Equal '0.0.0' $driver.VersaoAtual
         Assert-Equal 6 @($r | Where-Object Status -eq Inconclusivo).Count
     }
-    Test-Case 'Coleta CIM usa NET e preserva PCI de qualquer fabricante para posterior associacao' {
+    Test-Case 'Coleta CIM preserva drivers PCI de qualquer classe para posterior associacao' {
         $script:ClasseCimTeste=''; $script:FiltroCimTeste=''
         $script:DriversCimTeste=@(
             [pscustomobject]@{DeviceID='PCI\VEN_14E4&DEV_165F&SUBSYS_06391028&REV_01\EXEMPLO';DeviceName='Broadcom';DriverVersion='214.0.0.5';DriverProviderName='Broadcom';InfName='oem10.inf';IsSigned=$true},
@@ -1148,7 +1148,7 @@ Getting System Inventory ...
         try {
             $r = @(Get-DellWindowsNetworkDrivers)
             Assert-Equal 'Win32_PnPSignedDriver' $script:ClasseCimTeste
-            Assert-Equal "DeviceClass='NET'" $script:FiltroCimTeste
+            Assert-Equal "DeviceID LIKE 'PCI%'" $script:FiltroCimTeste
             Assert-Equal 2 $r.Count
             Assert-Equal '1028' $r[0].SubVendorID
             Assert-Equal '0639' $r[0].SubDeviceID
@@ -1261,6 +1261,283 @@ Getting System Inventory ...
         Assert-Equal 'Pendente' $r[0].Status
         Assert-Equal 'Não informada pelo DSU' $r[0].VersaoDSU
         Assert-Equal '17.2.1.0' $r[0].VersaoAtual
+    }
+
+    $autoFixture=Join-Path $PSScriptRoot 'fixtures\pacote-auto'
+    $autoInf=[IO.File]::ReadAllText((Join-Path $autoFixture 'rede.inf'))
+    $autoXml=[IO.File]::ReadAllText((Join-Path $autoFixture 'package.xml'))
+    $autoFile=[pscustomobject]@{FileName='Driver_Teste.EXE';FileType='LW64';HttpFileLocation='https://downloads.dell.com/FOLDER00001M/1/Driver_Teste.EXE';SHA256=('A'*64);FileSize=10}
+    $autoPkg=[pscustomobject]@{DriverId='A1B2C';DriverName='Driver de teste';Type='DRVR';DellVer='9.0, A00';Imp='Recommended';CatName='Rede';ReleaseDate='01 Oct 2026';FileFrmtInfo=$autoFile}
+    $autoCim=[pscustomobject]@{VendorID='8086';DeviceID='1234';SubVendorID='1028';SubDeviceID='ABCD';PnpDeviceID='PCI\VEN_8086&DEV_1234&SUBSYS_ABCD1028\SINTETICO';Versao='2.1.0.0';Provedor='Microsoft';Assinado=$true;InfName='exemplo.inf';Classe='Net'}
+    $autoPasta=Join-Path $pastaTeste 'auto-extraido'; [void][IO.Directory]::CreateDirectory($autoPasta)
+    Copy-Item -LiteralPath (Join-Path $autoFixture 'package.xml'),(Join-Path $autoFixture 'rede.inf') -Destination $autoPasta
+
+    Test-Case 'URL de pacote usa apenas HTTPS de repositorio Dell e nome exato' {
+        Assert-Equal 'https://downloads.dell.com/FOLDER1M/1/teste.EXE' (Get-DellPackageUrl 'https://dl.dell.com/FOLDER1M/1/teste.EXE' 'teste.EXE')
+        foreach($url in @('http://downloads.dell.com/teste.EXE','https://downloads.dell.com.evil.invalid/teste.EXE','https://www.dell.com/teste.EXE','https://usuario@downloads.dell.com/teste.EXE','https://downloads.dell.com:444/teste.EXE','https://downloads.dell.com/teste.EXE?token=privado','https://downloads.dell.com/outro.EXE')) {
+            Assert-Throws {Get-DellPackageUrl $url 'teste.EXE'}
+        }
+        Assert-Throws {Get-DellPackageUrl 'https://downloads.dell.com/teste.EXE' '..\teste.EXE'}
+    }
+    Test-Case 'HAR preserva somente URL de download segura tamanho e SHA256 sem tokens' {
+        $a=ConvertTo-DellPackageFileReference $autoFile
+        Assert-Equal ('A'*64) $a.SHA256
+        Assert-Equal 10 $a.FileSize
+        Assert-Equal $autoFile.HttpFileLocation $a.HttpFileLocation
+        $c=$autoFile.PSObject.Copy();$c.HttpFileLocation+='?segredo=privado'
+        Assert-Equal '' (ConvertTo-DellPackageFileReference $c).HttpFileLocation
+        $c.SHA256='hash invalido'
+        Assert-Equal '' (ConvertTo-DellPackageFileReference $c).SHA256
+    }
+    Test-Case 'SHA256 divergente e recusado antes de executar extracao' {
+        $f=Join-Path $pastaTeste 'nao-assinado.exe';[IO.File]::WriteAllText($f,'teste')
+        Assert-Throws {Assert-DellPackageFile $f ('A'*64)}
+        Assert-Throws {Invoke-DellMetadataExtraction $f $autoPasta ('A'*64)}
+    }
+    Test-Case 'Tamanhos acima de 2 GiB no HAR nao causam overflow e pacotes grandes nao sao baixados' {
+        $f=$autoFile.PSObject.Copy();$f.FileSize='2739242292'
+        Assert-Equal ([int64]2739242292) (ConvertTo-DellPackageFileReference $f).FileSize
+        Assert-Throws {Save-DellPackageDownload $f (Join-Path $pastaTeste 'grande.download')}
+    }
+    Test-Case 'Assinatura exige Dell valida incluindo razao social Dell Technologies Inc' {
+        $f=Join-Path $pastaTeste 'assinatura-fake.exe';[IO.File]::WriteAllText($f,'teste')
+        $hash=(Get-FileHash $f -Algorithm SHA256).Hash
+        $script:SignerAuto='CN=Dell Technologies Inc., O=Dell Technologies Inc., C=US';$script:StatusAuto='Valid'
+        function Get-AuthenticodeSignature {param($LiteralPath,$ErrorAction) [pscustomobject]@{Status=$script:StatusAuto;SignerCertificate=[pscustomobject]@{Subject=$script:SignerAuto;Thumbprint='FAKE'}}}
+        try {
+            Assert-Equal 'FAKE' (Assert-DellPackageFile $f $hash)
+            $script:SignerAuto='CN=Outro fabricante, O=Outro';Assert-Throws {Assert-DellPackageFile $f $hash}
+            $script:SignerAuto='CN=Dell Inc., O=Dell Inc.';$script:StatusAuto='HashMismatch';Assert-Throws {Assert-DellPackageFile $f $hash}
+        }
+        finally {Remove-Item Function:\Get-AuthenticodeSignature}
+    }
+    Test-Case 'Plano de extracao DUP sempre inclui s e e e nunca opcoes de instalacao' {
+        $p=Get-DellExtractionPlan 'C:\pacote.exe' 'C:\saida com espaco'
+        Assert-Equal 'C:\pacote.exe' $p.Executavel
+        Assert-Equal 3 $p.Argumentos.Count
+        Assert-Equal '/s' $p.Argumentos[0]
+        Assert-Equal '/e=C:\saida com espaco' $p.Argumentos[1]
+        Assert-True (($p.Argumentos -join ' ') -notmatch '(?i)(?:^|\s)/(?:f|r|c)(?:\s|$)')
+        $p=Get-DellExtractionPlan 'C:\pacote.exe' 'C:\saida' 'C:\7z.exe'
+        Assert-Equal 'C:\7z.exe' $p.Executavel
+        Assert-Equal 'x' $p.Argumentos[0]
+    }
+    Test-Case 'INF seleciona Models por fabricante arquitetura SO e build sem ler IDs arbitrarios' {
+        $r=@(ConvertFrom-DellInf $autoInf ([version]'10.0.14393') 3)
+        Assert-Equal 1 $r.Count
+        Assert-Equal '1234' $r[0].DeviceID
+        Assert-Equal '2.2.0.0' $r[0].Versao
+        $r=@(ConvertFrom-DellInf $autoInf ([version]'10.0.20348') 3)
+        Assert-Equal '5678' $r[0].DeviceID
+    }
+    Test-Case 'INF x86 versao invalida e modelos nao declarados nao sao usados' {
+        Assert-Equal 0 @(ConvertFrom-DellInf ($autoInf -replace 'NTamd64','NTarm64') ([version]'10.0.14393') 3).Count
+        Assert-Equal 0 @(ConvertFrom-DellInf ($autoInf -replace '2.2.0.0','INVALIDA') ([version]'10.0.14393') 3).Count
+        Assert-Equal 0 @(ConvertFrom-DellInf ($autoInf -replace '10/01/2026','DATA_INVALIDA') ([version]'10.0.14393') 3).Count
+        Assert-Equal 0 @(ConvertFrom-DellInf ($autoInf -replace '\[Manufacturer\]','[OutraSecao]') ([version]'10.0.14393') 3).Count
+    }
+    Test-Case 'INF restrito a workstation nao e aplicado a Windows Server' {
+        $texto=$autoInf -replace 'NTamd64.6.3','NTamd64.6.3.1' -replace 'NTamd64.10.0...','NTamd64.10.0.1..'
+        Assert-Equal 0 @(ConvertFrom-DellInf $texto ([version]'10.0.14393') 3).Count
+    }
+    Test-Case 'DriverVer DDInstall simples tem precedencia e override decorado nao e adivinhado' {
+        $texto=$autoInf+"`r`n[Instalar]`r`nDriverVer=10/01/2026,3.0.0.0`r`n"
+        Assert-Equal '3.0.0.0' @(ConvertFrom-DellInf $texto ([version]'10.0.14393') 3)[0].Versao
+        $texto=$autoInf+"`r`n[Instalar.NTamd64]`r`nDriverVer=10/01/2026,3.0.0.0`r`n"
+        Assert-Equal 0 @(ConvertFrom-DellInf $texto ([version]'10.0.14393') 3).Count
+    }
+    Test-Case 'DriverVer rejeita zero componentes fora do intervalo e versao nao Windows' {
+        foreach($v in @('0.0.0.0','1.65535.0.0','1.70000.0.0','1.2.3','999999999999999.2.3.4')){Assert-True (-not (Test-DellInfDriverVersion $v))}
+    }
+    Test-Case 'Metadados XML confirmam Windows arquitetura e edicao' {
+        $x=Read-DellPackageXml (Join-Path $autoFixture 'package.xml')
+        Assert-True (Test-DellPackageOs $x.DocumentElement WST14 'Windows Server 2016 Standard')
+        Assert-True (-not (Test-DellPackageOs $x.DocumentElement WST14 'Windows Server 2016 Datacenter'))
+        Assert-True (-not (Test-DellPackageOs $x.DocumentElement WS25L 'Windows Server 2025 Standard'))
+    }
+    Test-Case 'Metadados automaticos geram referencia de outro fabricante a partir de XML e INF' {
+        $r=Get-DellAutomaticPackageMetadata $autoPasta $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+        Assert-True $r.WindowsConfirmado
+        Assert-Equal 1 $r.DefinicoesDrivers.Count
+        Assert-Equal '2.2.0.0' $r.DefinicoesDrivers[0].VersaoDriver
+        Assert-Equal 0 @($r.DefinicoesDrivers[0].ComponentIDs).Count
+        Assert-Equal '9000' $r.ComponentIDs[0]
+        Assert-Equal '8086:1234:1028:ABCD' $r.DefinicoesDrivers[0].PerfisPCI[0]
+        $linhas=@(New-SiteAssessmentRows @() @($autoPkg) X Y 'PowerEdge R750' WST14 -DriversWindows @($autoCim) -MetadadosDrivers $r.DefinicoesDrivers)
+        Assert-Equal 'Pendente' $linhas[0].Status
+        Assert-Equal 'Driver_Teste.EXE' $linhas[0].NomeDoPacote
+        $outra=$r.DefinicoesDrivers[0].PSObject.Copy();$outra.PerfisPCI=@('8086:5678:1028:ABCD');$outra.VersaoDriver='99.0.0.0'
+        $linhas=@(New-SiteAssessmentRows @() @($autoPkg) X Y 'PowerEdge R750' WST14 -DriversWindows @($autoCim) -MetadadosDrivers @($r.DefinicoesDrivers[0],$outra))
+        Assert-Equal 'Pendente' $linhas[0].Status
+        Assert-Equal '2.2.0.0' $linhas[0].VersaoNova
+    }
+    Test-Case 'Metadados de outra identidade tipo ou versao de pacote sao recusados' {
+        foreach($campo in @('DriverId','Type','DellVer')) {
+            $p=$autoPkg.PSObject.Copy();$p.$campo='OUTRO'
+            Assert-Throws {Get-DellAutomaticPackageMetadata $autoPasta $p $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3}
+        }
+    }
+    Test-Case 'DUP sem INF ou Windows comprovado nao inventa versao de driver' {
+        $r=Get-DellAutomaticPackageMetadata $autoPasta $autoPkg $autoFile WS25L 'Windows Server 2025 Standard' ([version]'10.0.26100') 3
+        Assert-Equal 0 $r.DefinicoesDrivers.Count
+        $p=Join-Path $pastaTeste 'auto-sem-inf';[void][IO.Directory]::CreateDirectory($p)
+        Copy-Item (Join-Path $autoFixture 'package.xml') $p
+        $r=Get-DellAutomaticPackageMetadata $p $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+        Assert-Equal 0 $r.DefinicoesDrivers.Count
+    }
+    Test-Case 'XML automatico rejeita DTD schema estranho e manifesto duplicado' {
+        $p=Join-Path $pastaTeste 'auto-xml-invalido';[void][IO.Directory]::CreateDirectory($p)
+        $f=Join-Path $p 'package.xml'
+        [IO.File]::WriteAllText($f,'<!DOCTYPE X [<!ENTITY a SYSTEM "file:///C:/Windows/win.ini">]><X/>')
+        Assert-Throws {Read-DellPackageXml $f}
+        [IO.File]::WriteAllText($f,($autoXml -replace 'schemaVersion="1.0"','schemaVersion="2.0"'))
+        Assert-Throws {Get-DellAutomaticPackageMetadata $p $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3}
+    }
+    Test-Case 'PCI ausente ou divergente no INF nao recebe referencia pelo nome do pacote' {
+        $p=Join-Path $pastaTeste 'auto-inf-outro';[void][IO.Directory]::CreateDirectory($p)
+        [IO.File]::WriteAllText((Join-Path $p 'package.xml'),$autoXml)
+        [IO.File]::WriteAllText((Join-Path $p 'rede.inf'),($autoInf -replace 'DEV_1234','DEV_8888'))
+        $r=Get-DellAutomaticPackageMetadata $p $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+        Assert-Equal 0 $r.DefinicoesDrivers.Count
+    }
+    Test-Case 'INF com revisao especifica nao amplia automaticamente o suporte para outras revisoes' {
+        $p=Join-Path $pastaTeste 'auto-inf-rev';[void][IO.Directory]::CreateDirectory($p)
+        [IO.File]::WriteAllText((Join-Path $p 'package.xml'),$autoXml)
+        [IO.File]::WriteAllText((Join-Path $p 'rede.inf'),($autoInf -replace 'SUBSYS_ABCD1028','SUBSYS_ABCD1028&REV_01'))
+        $r=Get-DellAutomaticPackageMetadata $p $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+        Assert-Equal 0 $r.DefinicoesDrivers.Count
+    }
+    Test-Case 'INFs equivalentes sao unidos sem criar ambiguidade artificial' {
+        $p=Join-Path $pastaTeste 'auto-inf-duplo';[void][IO.Directory]::CreateDirectory($p)
+        [IO.File]::WriteAllText((Join-Path $p 'package.xml'),$autoXml)
+        [IO.File]::WriteAllText((Join-Path $p 'um.inf'),$autoInf)
+        [IO.File]::WriteAllText((Join-Path $p 'dois.inf'),$autoInf)
+        $r=Get-DellAutomaticPackageMetadata $p $autoPkg $autoFile WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+        Assert-Equal 1 $r.DefinicoesDrivers.Count
+        Assert-Equal 2 $r.FontesINF.Count
+    }
+    $fwMeta=[pscustomobject]@{DriverId='FW123';Tipo='FRMW';Versao='2.0.0';ComponentIDs=@('555');PerfisPCI=@();WindowsConfirmado=$true;IndependenteSO=$false;Modelos=@()}
+    $fwPkg=[pscustomobject]@{DriverId='FW123';Type='FRMW';DellVer='2.0.0';Imp='Urgent';ReleaseDate='01 Oct 2026';FileFrmtInfo=$autoFile}
+    $fwLinha=[pscustomobject]@{Hostname='X';ServiceTag='Y';Modelo='PowerEdge R750';Componente='Firmware exemplo';Categoria='FRMW';ComponentID='555';VersaoAtual='1.0.0';VersaoNova='';NomeDoPacote='';Criticidade='';DataDeLancamento='';URL='';Status='Inconclusivo';Motivo=''}
+    Test-Case 'Firmware automatico usa ComponentID e versoes numericas sem depender do modelo' {
+        $r=@(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($fwMeta) @($fwPkg) 'PowerEdge R750')
+        Assert-Equal 'Pendente' $r[0].Status
+        Assert-Equal '2.0.0' $r[0].VersaoNova
+    }
+    Test-Case 'Firmware alfanumerico multi-componente ou sem SO permanece inconclusivo' {
+        $l=$fwLinha.PSObject.Copy();$l.VersaoAtual='AB01'
+        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($l) @($fwMeta) @($fwPkg) X)[0].Status
+        $m=$fwMeta.PSObject.Copy();$m.ComponentIDs=@('555','556')
+        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($m) @($fwPkg) X)[0].Status
+        $m=$fwMeta.PSObject.Copy();$m.WindowsConfirmado=$false
+        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($m) @($fwPkg) X)[0].Status
+    }
+    Test-Case 'Nome parecido sem identidade de hardware nao associa firmware' {
+        $l=$fwLinha.PSObject.Copy();$l.ComponentID='OUTRO'
+        $r=@(Merge-DellAutomaticFirmwareRows @($l) @($fwMeta) @($fwPkg) X)
+        Assert-Equal '' $r[0].VersaoNova
+        $l | Add-Member VendorID '8086';$l | Add-Member DeviceID '1234';$l | Add-Member SubVendorID '1028';$l | Add-Member SubDeviceID 'ABCD'
+        $m=$fwMeta.PSObject.Copy();$m.PerfisPCI=@('8086:1234:1028:ABCD')
+        Assert-Equal '' @(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) X)[0].VersaoNova
+    }
+    Test-Case 'Firmware automatico acima da referencia nao sugere downgrade' {
+        $l=$fwLinha.PSObject.Copy();$l.VersaoAtual='3.0.0'
+        Assert-Equal 'Acima da referência' @(Merge-DellAutomaticFirmwareRows @($l) @($fwMeta) @($fwPkg) X)[0].Status
+    }
+    Test-Case 'Referencia automatica mais nova nao deixa firmware confirmado apenas pela referencia antiga' {
+        $l=$fwLinha.PSObject.Copy();$l.Status='Atualizado na referência';$l.Categoria='Rede';$l | Add-Member TipoDSU FRMW
+        $l.DataDeLancamento='2025-01-01';$l.VersaoAtual='1.0.0'
+        $r=@(Merge-DellAutomaticFirmwareRows @($l) @($fwMeta) @($fwPkg) X)
+        Assert-Equal 'Pendente' $r[0].Status
+        $l.Status='Atualizado na referência';$l.DataDeLancamento='2025-01-01';$m=$fwMeta.PSObject.Copy();$m.WindowsConfirmado=$false
+        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) X)[0].Status
+    }
+    Test-Case 'BIOS com ComponentID igual mas modelo diferente permanece inconclusivo' {
+        $l=$fwLinha.PSObject.Copy();$l.Categoria='BIOS'
+        $m=$fwMeta.PSObject.Copy();$m.Tipo='BIOS';$m.Modelos=@('PowerEdge R350')
+        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) 'PowerEdge R750')[0].Status
+    }
+
+    # Isola rede/assinatura/extração para testar cache sem executar código de fornecedor.
+    $origDownload=${function:Save-DellPackageDownload};$origAssinatura=${function:Assert-DellPackageFile};$origExtracao=${function:Invoke-DellMetadataExtraction}
+    $script:DownloadsAutoTeste=0;$script:ExtracoesAutoTeste=0;$script:FalharExtracaoAuto=$false;$script:SemInfAutoTeste=$false
+    $script:AutoFixtureTeste=$autoFixture
+    function Save-DellPackageDownload {param($Arquivo,$Destino) $script:DownloadsAutoTeste++;[IO.File]::WriteAllText($Destino,'pacote fake');return 11}
+    function Assert-DellPackageFile {param($Arquivo,$SHA256) if((Get-FileHash $Arquivo -Algorithm SHA256).Hash -ine $SHA256){throw 'Hash divergente no teste.'};return 'ASSINANTE_SINTETICO'}
+    function Invoke-DellMetadataExtraction {param($Pacote,$Pasta,$SHA256) $script:ExtracoesAutoTeste++;if($script:FalharExtracaoAuto){throw 'Falha simulada de extracao'}; Copy-Item (Join-Path $script:AutoFixtureTeste 'package.xml') $Pasta; if(-not $script:SemInfAutoTeste){Copy-Item (Join-Path $script:AutoFixtureTeste 'rede.inf') $Pasta}}
+    # O cache fica em Temp curto para exercitar MAX_PATH do Windows PowerShell 5.1.
+    $cacheTeste=Join-Path $env:TEMP ('dac_'+[guid]::NewGuid().ToString('N').Substring(0,8))
+    $fileCache=$autoFile.PSObject.Copy();$fileCache.SHA256=([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create()).ComputeHash([Text.Encoding]::UTF8.GetBytes('pacote fake')))).Replace('-','')
+    try {
+        Test-Case 'Cache baixa uma vez e revalida e reextrai nas execucoes seguintes' {
+            $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+            Assert-Equal 'Download' $r.Origem
+            $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+            Assert-Equal 'Cache' $r.Origem
+            Assert-Equal 1 $script:DownloadsAutoTeste
+            Assert-Equal 2 $script:ExtracoesAutoTeste
+        }
+        Test-Case 'Cache adulterado e descartado antes de nova analise' {
+            [IO.File]::WriteAllText((Join-Path (Join-Path $cacheTeste $fileCache.SHA256) 'pacote.exe'),'adulterado')
+            $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+            Assert-Equal 'Download' $r.Origem
+            Assert-Equal 2 $script:DownloadsAutoTeste
+        }
+        Test-Case 'Sem SHA256 URL segura ou com cache UNC nao inicia download nem extracao' {
+            $contador=$script:DownloadsAutoTeste
+            $f=$fileCache.PSObject.Copy();$f.SHA256=''
+            Assert-Throws {Get-DellCachedPackageMetadata $autoPkg $f $cacheTeste WST14 X ([version]'10.0.14393') 3}
+            $f=$fileCache.PSObject.Copy();$f.HttpFileLocation='https://evil.invalid/Driver_Teste.EXE'
+            Assert-Throws {Get-DellCachedPackageMetadata $autoPkg $f $cacheTeste WST14 X ([version]'10.0.14393') 3}
+            Assert-Throws {Get-DellCachedPackageMetadata $autoPkg $fileCache '\\servidor\cache' WST14 X ([version]'10.0.14393') 3}
+            Assert-Equal $contador $script:DownloadsAutoTeste
+        }
+        Test-Case 'Falha de extracao limpa somente pasta temporaria e libera o lock' {
+            $script:FalharExtracaoAuto=$true
+            Assert-Throws {Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 X ([version]'10.0.14393') 3}
+            $script:FalharExtracaoAuto=$false
+            $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
+            Assert-Equal 'Cache' $r.Origem
+            Assert-Equal 0 @(Get-ChildItem (Join-Path $cacheTeste $fileCache.SHA256) -Filter 'extracao_*').Count
+        }
+        Test-Case 'Analise automatica gera auditoria de limite e nao baixa indefinidamente' {
+            $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+            $r=Get-DellAutomaticMetadata @($p,$p) @() $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+            Assert-True $r.Parcial
+            Assert-Equal 1 $r.Examinados
+            Assert-Equal 1 $r.Metadados.Count
+            $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+            Assert-Equal 1 @($csv | Where-Object Status -eq Limite).Count
+            Assert-Equal 'EF-BB-BF' ([BitConverter]::ToString(([IO.File]::ReadAllBytes((Join-Path $pastaTeste 'pacotes-analise.csv')))[0..2]))
+        }
+        Test-Case 'XML extraido sem versao de driver utilizavel e analise parcial em vez de sucesso completo' {
+            $script:SemInfAutoTeste=$true
+            try {
+                $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+                $r=Get-DellAutomaticMetadata @($p) @() $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+                Assert-True $r.Parcial
+                $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+                Assert-Equal 'ExtraidoParcial' $csv[0].Status
+            }
+            finally {$script:SemInfAutoTeste=$false}
+        }
+    }
+    finally {
+        ${function:Save-DellPackageDownload}=$origDownload;${function:Assert-DellPackageFile}=$origAssinatura;${function:Invoke-DellMetadataExtraction}=$origExtracao
+        $cacheResolvido=[IO.Path]::GetFullPath($cacheTeste)
+        $tempPermitido=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')+'\'
+        if($cacheResolvido.StartsWith($tempPermitido,[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $cacheResolvido) -match '^dac_[0-9a-f]{8}$' -and (Test-Path -LiteralPath $cacheResolvido)){Remove-Item -LiteralPath $cacheResolvido -Recurse -Force}
+    }
+
+    Test-Case 'Tres falhas de rede interrompem novas tentativas preservando auditoria parcial' {
+        $origCache=${function:Get-DellCachedPackageMetadata};$script:RedeAutoTentativas=0
+        function Get-DellCachedPackageMetadata {param($Pacote,$Arquivo,$Cache,$SO,$LegendaSO,$WindowsVersao,$ProductType) $script:RedeAutoTentativas++;throw ([Net.WebException]::new('Rede simulada indisponivel',[Net.Sockets.SocketException]::new()))}
+        try {
+            $r=Get-DellAutomaticMetadata @($autoPkg,$autoPkg,$autoPkg,$autoPkg,$autoPkg) @() $pastaTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 30
+            Assert-True $r.Parcial
+            Assert-Equal 3 $script:RedeAutoTentativas
+        }
+        finally {${function:Get-DellCachedPackageMetadata}=$origCache}
     }
 
     Test-Case 'Wrapper nativo captura stdout e stderr e encerra sem pipe bloqueado' {
