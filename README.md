@@ -260,6 +260,14 @@ O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e 
 | `Acima da referência` | A versão instalada é superior à referência; não é sugerido downgrade. |
 | `Inconclusivo` | Não houve identificação, associação ou comparação segura pelas regras implementadas. |
 
+### O que significa inconclusivo
+
+**O script não conseguiu determinar com segurança se aquele componente precisa de atualização.** Ele pode estar atualizado ou ter uma pendência. Não significa, necessariamente, que o nome encontrado pelo DSU não exista no site Dell.
+
+Um componente pode aparecer com outro nome, fazer parte de um pacote que atende vários dispositivos, ter versão instalada zero ou não ter uma regra de associação implementada. Para marcar uma pendência, é preciso associar o pacote ao dispositivo e comparar versões equivalentes. Por isso nomes genéricos de NICs e discos não são usados como prova de aplicabilidade.
+
+Consulte a coluna **`Motivo`** do `_Verificacao.csv` para saber a razão de cada caso. Essa classificação exige revisão; não deve ser contada como componente atualizado nem como atualização pendente confirmada.
+
 No modo Site, a linha **“Nenhuma atualização pendente”** exige ausência de pendências e de registros inconclusivos no inventário em escopo. Ela continua limitada ao que foi inventariado e à referência consultada; não é uma certificação de atualização completa do servidor.
 
 No modo automático, o diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodificada), `downloads-site.json` (registros efetivamente usados; filtrados por tag somente no modo experimental `ServiceTag`), `fonte-site.txt`, os textos de ajuda/inventário concluídos ou o arquivo importado. A fonte registra o tipo de consulta e as quantidades recebida/usada; o log registra horários, etapas e contagens. As saídas brutas de um processo só são gravadas depois do encerramento do processo e da captura dos pipes; podem não existir em uma falha por timeout.
@@ -369,7 +377,7 @@ powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 
 São **80 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
-Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. Esses testes não substituem a validação de uma captura HAR real do navegador do usuário.
+Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
 O caso real anterior de R530, comparado **pela consulta por modelo**, com identificadores removidos e versões preservadas, produziu 25 registros: seis aplicativos excluídos, duas pendências identificadas, um componente na versão publicada e 16 inconclusivos. Isso não comprova a mesma seleção na consulta por tag. As referências públicas usadas foram:
 
@@ -379,7 +387,41 @@ O caso real anterior de R530, comparado **pela consulta por modelo**, com identi
 | PERC H730P Mini | 25.5.3.0005 | [25.5.9.0001 / 700GG][perc-h730p] | Recomendado |
 | iDRAC | 2.86.86.86 | [2.86.86.86 / VWF72][idrac8] | Recomendado; mesma versão |
 
-A consulta online de 352 registros é evidência da fonte por modelo naquele momento. Os testes offline usam um recorte fixo de seis registros reais e acrescentam campos de tag sintéticos em memória para testar o novo fluxo; não são uma resposta online real por tag. Os casos de importação manual usam HARs sintetizados para verificar seleção e rejeição de capturas inadequadas. **Ainda não foi fornecido um HAR real do navegador do usuário para validar esse fluxo de ponta a ponta.** A consulta por tag, a importação real, a execução completa com CIM/DSU e a decisão de atualizar cada pacote precisam de validação no servidor alvo.
+A consulta online de 352 registros é evidência da fonte por modelo naquele momento. Os testes offline usam um recorte fixo de seis registros reais e acrescentam campos de tag sintéticos em memória; não representam uma resposta online real por tag. A decisão de instalar cada pacote continua exigindo análise de aplicabilidade, pré-requisitos e procedimento de manutenção.
+
+### Validação real da importação manual em 29/10/2026
+
+O usuário executou o modo `-ArquivoSiteDell` em um **PowerEdge R530 com Windows Server 2016 Standard**. A revisão do log, dos metadados da fonte e dos dois CSVs confirmou:
+
+| Etapa ou resultado | Evidência observada |
+| --- | --- |
+| Referência importada | 323 downloads, produto `poweredge-r530`, SO `WST14` |
+| Escopo efetivamente recebido | `Modelo`, endpoint `packdriversbyproduct`, mesmo com a página acessada pela Service Tag |
+| Inventário DSU | Concluído com código 0; 25 componentes interpretados |
+| Resultado em escopo | 2 pendências identificadas, 1 componente atualizado na referência e 16 inconclusivos |
+| Aplicativos fora do escopo | 6 registros excluídos da comparação |
+| Saída | CSV principal, CSV de verificação e log gerados; UTF-8 com BOM confirmado no CSV principal |
+
+As pendências identificadas foram **BIOS 2.5.4 → 2.19.0 (Urgente)** e **PERC H730P Mini 25.5.3.0005 → 25.5.9.0001 (Recomendado)**. O iDRAC estava na versão publicada na referência consultada. A execução não instalou atualizações.
+
+Uma captura anterior, também válida, continha 352 downloads para **Windows Server 2012 R2 (`W12R2`)**. Ela foi corretamente recusada para o servidor 2016. Após selecionar o SO correto e exportar novamente, o processamento terminou com sucesso.
+
+Esse teste comprova o fluxo **HAR manual + inventário local + comparação por modelo/SO** nesse servidor. Não comprova filtragem pela Service Tag nem ausência de pendências nos 16 componentes inconclusivos. HAR, hostname, tag e relatórios operacionais não integram o repositório.
+
+## 8. Testes no GitHub e fluxo de branches
+
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 80 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+
+O fluxo de trabalho é:
+
+1. Criar `feature/nome-da-mudanca` a partir da `main` atualizada.
+2. Implementar a alteração e executar `powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1` localmente.
+3. Fazer commit e push da branch e abrir um pull request para `main`.
+4. Conferir as duas execuções de testes e integrar apenas após sucesso.
+
+`main` é a branch principal de integração. A antiga `master` é preservada para manter a referência anterior. O workflow fornece os checks; sua existência, por si só, não configura regras de proteção nem impede pushes diretos. As execuções podem ser acompanhadas em [GitHub Actions](https://github.com/fellypedarosa/RelatorioDell/actions).
+
+A configuração segue a [sintaxe oficial de workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax). Os testes cobrem o parser e as regras implementadas; testes verdes não certificam todas as condições de atualização dos servidores.
 
 ## Referências Dell
 

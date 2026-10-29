@@ -34,6 +34,8 @@ Você não precisa editar esses campos. Hostname, tag, modelo e Windows do servi
 
 O registro precisa começar **antes** do carregamento da lista. Se as ferramentas foram abertas apenas depois de tudo carregar, recarregue a página com a guia Rede aberta. Em versões antigas, a opção pode aparecer como **Save all as HAR with content**. O requisito é que o arquivo inclua o corpo da resposta; exportar apenas nomes/URLs das solicitações não basta.
 
+Na versão usada no teste real, o diálogo de exportação não ofereceu `.har` entre os tipos de arquivo. Foi possível exportar pela aba **Rede**, salvar e renomear o arquivo para `DownloadsDell.har`. O conteúdo foi reconhecido como HAR pelo script. A extensão do nome não é a validação: o importador também exige a estrutura HAR e a resposta de downloads. Renomear um rastreamento produzido por outra ferramenta não converte seu conteúdo.
+
 A Microsoft e o Google documentam a exportação na [referência de rede do Edge](https://learn.microsoft.com/en-us/microsoft-edge/devtools/network/reference#save-all-network-requests-to-a-har-file) e na [referência de rede do Chrome](https://developer.chrome.com/docs/devtools/network/reference/#save-all-network-requests-to-a-har-file). A sanitização remove determinados cabeçalhos, mas não garante anonimização de URLs e corpos de resposta.
 
 ## Como executar
@@ -92,4 +94,6 @@ O diagnóstico guarda os downloads normalizados e os metadados de importação, 
 
 O HAR sanitizado pode continuar contendo a Service Tag, identificadores opacos, URLs e dados de resposta. “Sanitizado” não significa “anônimo”. Não são necessárias credenciais, cookies ou arquivos de sessão para a leitura local.
 
-Os testes automatizados usam capturas sintetizadas e verificam seleção e rejeição de entradas inadequadas. **Ainda não foi fornecida uma captura HAR real do navegador do usuário para validar esta alternativa de ponta a ponta.** A primeira execução deve conferir o produto, SO e escopo registrados, o encerramento bem-sucedido no log e alguns pacotes do CSV contra a página Dell. Uma contagem de downloads não é uma contagem de atualizações pendentes.
+Os testes automatizados usam capturas sintetizadas e verificam seleção e rejeição de entradas inadequadas. **O fluxo real foi validado em 29/10/2026**, em um PowerEdge R530 com Windows Server 2016: importou 323 downloads em escopo Modelo, concluiu o inventário DSU de 25 componentes e gerou os CSVs com duas pendências identificadas, um componente atualizado na referência e 16 inconclusivos. Consulte o [registro no README](../README.md#validação-real-da-importação-manual-em-29102026).
+
+Uma captura anterior com Windows Server 2012 R2 foi recusada para o servidor 2016; selecionar o SO correto resolveu esse erro. Uma contagem de downloads não é uma contagem de atualizações pendentes. Em cada novo servidor, confira produto, SO e escopo registrados, término bem-sucedido no log e os casos inconclusivos antes de tomar decisões de atualização.

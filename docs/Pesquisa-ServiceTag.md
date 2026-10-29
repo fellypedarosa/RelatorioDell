@@ -2,7 +2,7 @@
 
 Pesquisa realizada em **28/10/2026**, considerando PowerEdge com Windows Server, execução independente por cliente e relatório sem instalação de atualizações.
 
-**Atualização da implementação:** a alternativa de importar um HAR agora está disponível por `-ArquivoSiteDell`, com testes offline. O procedimento está em [Importação manual](Importacao-Manual-Dell.md). As seções abaixo preservam a pesquisa original; a validação de uma captura real do usuário continua pendente.
+**Atualização da implementação:** a alternativa de importar um HAR está disponível por `-ArquivoSiteDell`, com testes offline e uma execução real validada em 29/10/2026 em R530/Windows Server 2016. A captura recebida usou escopo Modelo, não filtro por tag. O procedimento está em [Importação manual](Importacao-Manual-Dell.md) e os resultados estão no [README](../README.md#validação-real-da-importação-manual-em-29102026). As seções abaixo preservam a pesquisa original e suas propostas; não descrevem uma API automática por tag validada.
 
 ## Recomendação
 
