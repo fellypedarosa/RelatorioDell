@@ -80,7 +80,7 @@ Para reaproveitar o XML já coletado **neste mesmo servidor**, inclusive junto c
 .\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml'
 ```
 
-**Prefira XML:** ele preserva modelos de discos físicos atrás da PERC, baias/FQDD, Component IDs e PCI IDs que podem não aparecer no resumo textual. O parâmetro detecta XML `SVMInventory` com `schemaVersion="1.0"` e continua aceitando o texto antigo. O XML precisa estar completo, com dispositivos e suas aplicações/versões; não exige `Exiting DSU!`. O texto importado continua exigindo essa mensagem e linhas numeradas reconhecidas. Arquivos acima de 10 MiB, XML inválido ou com DTD são recusados.
+**Prefira XML:** ele preserva modelos de discos físicos atrás da PERC, baias/FQDD, Component IDs e PCI IDs que podem não aparecer no resumo textual. O parâmetro detecta XML `SVMInventory` com `schemaVersion="1.0"` e continua aceitando o texto antigo. O XML precisa estar bem formado e completo na sua estrutura, com dispositivos e aplicações identificadas; não exige `Exiting DSU!`. Uma versão ausente/vazia gera aviso e é preservada em branco, sem bloquear os outros componentes. O texto importado continua exigindo a mensagem de encerramento e linhas numeradas reconhecidas. Arquivos acima de 10 MiB, XML inválido ou com DTD são recusados.
 
 A importação **não comprova a identidade da máquina nem a atualidade da coleta**: use somente inventário deste servidor. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
 
@@ -281,6 +281,8 @@ Na importação manual com `-ConsultaSite ServiceTag`, a identidade exigida é a
 Sem arquivo importado, o script localiza o DSU, executa `--help` e confere `--inventory`. Se a ajuda anunciar `--output-inventory-xml`, executa **as duas opções juntas** e lê o XML após o término com código zero. Se a ajuda não anunciar exportação XML, registra um aviso e usa o texto, com menor identificação de hardware. Quando o XML foi solicitado, ausência, truncamento ou erro da coleta interrompem o relatório: não há fallback textual para esconder a falha. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. Consulte o [inventário][inventario-dsu] e a [exportação XML][xml-dsu] documentados pela Dell.
 
 No XML, `Application.display`, `version` e `componentType` informam nome, versão e tipo. `Device.display` pode conter o modelo físico que faltava no texto. São preservados `componentID`, `FQDD`, os quatro PCI IDs, endereço bus/device/function e `enum`, quando presentes. Discos e interfaces iguais continuam sendo instâncias separadas. IDs coletados não são, por si só, prova de correspondência com um pacote do site.
+
+Nome (`display`) e tipo (`componentType`) continuam obrigatórios. O coletor pode terminar normalmente e deixar `version` vazio ou ausente em uma aplicação: nesse caso o script registra um aviso e mantém o componente no inventário, sem preencher zero, descartar o dispositivo ou interromper a análise dos demais. Sem uma versão instalada confiável, BIOS/firmware permanecem inconclusivos, inclusive quando há pacote candidato. Um driver com referência validada ainda pode usar a versão efetiva obtida pelo CIM; `VersaoDSU` permanece vazio e `FonteVersao` identifica a origem usada. XML truncado, sem aplicações ou com estrutura desconhecida continua sendo recusado.
 
 ### Associação dos componentes
 
@@ -649,7 +651,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **166 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **170 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -719,7 +721,7 @@ As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, 
 
 ### Validação da obtenção automática de metadados
 
-A suíte offline tem **166 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
+A suíte offline tem **170 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
 
 Uma validação separada neste ambiente usou cinco DUPs reais obtidos pelos links/hashes do HAR: **49X84, DFF48, 99GP4, K5DP6 e H81H3**. SHA256 e assinatura Dell foram conferidos. O fluxo extraiu e interpretou os manifestos dos três primeiros por 7-Zip. Os dois últimos não expuseram o manifesto nessa via; a tentativa de `/s /e` foi recusada pelo Windows por exigir elevação na sessão do agente. A execução nativa como administrador permanece para validação no servidor de teste; não foi declarada como concluída aqui.
 
@@ -747,9 +749,15 @@ Na mesma execução, DYYN1/VJWX0 foram extraídos com código zero, mas recebera
 
 Para repetir a análise sem nova coleta do DSU, use `-ArquivoInventario` com o `inventory.xml` da pasta de diagnóstico gerada **nesse mesmo servidor**. A consulta CIM continua sendo feita localmente; o cache de pacotes é reutilizado e revalidado normalmente.
 
+### Inventário XML com versão não informada
+
+Em um PowerEdge R540 com Windows Server 2019, o DSU 2.2.0.1 terminou com código zero e gerou 26 aplicações. Uma delas, um disco identificado como Seagate ExpansionHDD, não tinha valor em `version`. A validação anterior interrompia todo o relatório por esse campo. Agora a entrada é preservada e avaliada como inconclusiva por falta da versão instalada, sem exceção por modelo, fabricante ou nome de servidor.
+
+O reprocessamento local do XML recebido confirmou as 26 aplicações e a preservação do dispositivo sem versão. Os testes cobrem atributo ausente, vazio e contendo espaços, análise dos outros componentes, presença no CSV de verificação, comparação por CIM quando há evidência válida e impossibilidade de confirmar uma pendência de firmware sem versão instalada. A validação estrutural e a restrição a versões comparáveis permanecem. Esse reprocessamento confirma o leitor e a avaliação local; a execução integral corrigida ainda precisa ser repetida no servidor.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 166 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 170 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 

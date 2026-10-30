@@ -891,7 +891,38 @@ Getting System Inventory ...
             Assert-Throws { ConvertFrom-DsuInventoryXml -Texto $texto }
         }
         Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace '<Application display="BIOS"[^>]*/>', '') }
-        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace 'version="EG02"', 'version=""') }
+        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace '<Application display="BIOS"', '<Application display=""') }
+        Assert-Throws { ConvertFrom-DsuInventoryXml -Texto ($xmlTexto -replace 'componentType="BIOS"', 'componentType=""') }
+    }
+    Test-Case 'XML com versao vazia ausente ou em branco preserva dispositivo e demais aplicacoes' {
+        foreach($atributo in @('', ' version=""', ' version="   "')) {
+            $texto='<SVMInventory schemaVersion="1.0"><Device display="Dispositivo exemplo" componentID="777"><Application display="Firmware exemplo" componentType="FRMW"'+$atributo+'/></Device><Device display="BIOS"><Application display="BIOS" componentType="BIOS" version="1.0"/></Device></SVMInventory>'
+            $r=@(ConvertFrom-DsuInventoryXml -Texto $texto)
+            Assert-Equal 2 $r.Count
+            Assert-Equal '' $r[0].Versao
+            Assert-Equal '777' $r[0].ComponentID
+            Assert-Equal '1.0' $r[1].Versao
+        }
+    }
+    Test-Case 'Firmware sem versao continua inconclusivo sem bloquear BIOS nem sumir do CSV' {
+        $texto='<SVMInventory schemaVersion="1.0"><Device display="Disco exemplo"><Application display="Firmware exemplo" componentType="FRMW"/></Device><Device display="BIOS"><Application display="BIOS" componentType="BIOS" version="1.0"/></Device></SVMInventory>'
+        $inventario=@(ConvertFrom-DsuInventoryXml $texto)
+        $pacote=[pscustomobject]@{DriverId='BIOSX';DriverName='BIOS';Type='BIOS';DellVer='2.0';ReleaseDate='01 Oct 2026';Imp='Urgent';CatName='BIOS';FileFrmtInfo=[pscustomobject]@{FileName='BIOSX.EXE';FileType='LW64'}}
+        $r=@(New-SiteAssessmentRows $inventario @($pacote) X Y 'PowerEdge exemplo' WS19L)
+        Assert-Equal 2 $r.Count
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-Equal '' $r[0].VersaoAtual
+        Assert-Equal '' $r[0].VersaoDSU
+        Assert-True ($r[0].Motivo -match 'não informou a versão instalada')
+        Assert-Equal 'Pendente' $r[1].Status
+        $arquivo=Join-Path $pastaTeste 'sem-versao.csv'
+        Export-SiteAssessment $r $arquivo X Y 'PowerEdge exemplo'
+        $principal=@(Import-Csv -LiteralPath $arquivo -Delimiter ';' -Encoding UTF8)
+        Assert-Equal 1 @($principal | Where-Object Componente -like 'Verificação parcial*').Count
+        $auditoria=@(Import-Csv -LiteralPath (Join-Path $pastaTeste 'sem-versao_Verificacao.csv') -Delimiter ';' -Encoding UTF8)
+        Assert-Equal 2 $auditoria.Count
+        Assert-Equal 'Firmware exemplo' $auditoria[0].Componente
+        Assert-Equal 'Inconclusivo' $auditoria[0].Status
     }
     Test-Case 'XML rejeita entidades externas e DTD mesmo se parecer inventario' {
         $xxe = '<!DOCTYPE SVMInventory [<!ENTITY e SYSTEM "file:///C:/Windows/win.ini">]><SVMInventory schemaVersion="1.0"><Device><Application display="&e;" version="1.0" componentType="BIOS"/></Device></SVMInventory>'
@@ -1193,6 +1224,16 @@ Getting System Inventory ...
     }
 
     $driversMicrosoft = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\drivers-windows-net-exemplo.json')))
+    Test-Case 'Driver sem versao no DSU pode usar evidencia CIM validada sem inventar VersaoDSU' {
+        $inventario=@($xmlInventario | ForEach-Object {$_.PSObject.Copy()})
+        @($inventario | Where-Object ComponentID -eq '8641')[0].Versao=''
+        $r=@(New-SiteAssessmentRows $inventario $downloadsDrivers X Y 'PowerEdge exemplo' WST14 -DriversWindows $driversMicrosoft)
+        $driver=@($r | Where-Object ComponentID -eq '8641')[0]
+        Assert-Equal 'Pendente' $driver.Status
+        Assert-Equal '' $driver.VersaoDSU
+        Assert-Equal '17.2.1.0' $driver.VersaoAtual
+        Assert-True ($driver.FonteVersao -match 'CIM')
+    }
     Test-Case 'Driver assinado Microsoft e aceito por hardware e referencia Dell sem regra de versao instalada' {
         $r = @(New-SiteAssessmentRows $xmlInventario $downloadsDrivers X Y Z WST14 -DriversWindows $driversMicrosoft)
         $driver = @($r | Where-Object ComponentID -eq '8641')[0]
@@ -1531,6 +1572,14 @@ Getting System Inventory ...
         $r=@(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($fwMeta) @($fwPkg) 'PowerEdge R750')
         Assert-Equal 'Pendente' $r[0].Status
         Assert-Equal '2.0.0' $r[0].VersaoNova
+    }
+    Test-Case 'Pacote automatico identificado nao confirma pendencia de firmware sem versao instalada' {
+        $l=$fwLinha.PSObject.Copy();$l.VersaoAtual=''
+        $r=@(Merge-DellAutomaticFirmwareRows @($l) @($fwMeta) @($fwPkg) 'PowerEdge exemplo')
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-Equal '' $r[0].VersaoAtual
+        Assert-Equal '2.0.0' $r[0].VersaoNova
+        Assert-True ($r[0].Motivo -match 'não informou a versão instalada')
     }
     Test-Case 'Firmware alfanumerico multi-componente ou sem SO permanece inconclusivo' {
         $l=$fwLinha.PSObject.Copy();$l.VersaoAtual='AB01'

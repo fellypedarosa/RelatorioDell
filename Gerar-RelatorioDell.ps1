@@ -881,14 +881,20 @@ function ConvertFrom-DsuInventoryXml {
         $aplicacoes = @($dispositivo.SelectNodes('Application'))
         if ($aplicacoes.Count -eq 0) { throw 'XML de inventário contém dispositivo sem Application; coleta incompleta ou schema diferente.' }
         foreach ($aplicacao in $aplicacoes) {
-            foreach ($atributo in @('display', 'version', 'componentType')) {
+            foreach ($atributo in @('display', 'componentType')) {
                 if ([string]::IsNullOrWhiteSpace($aplicacao.GetAttribute($atributo))) { throw "XML de inventário contém Application sem $atributo." }
+            }
+            # O coletor pode concluir com um dispositivo sem versão. Preserva a
+            # entrada e o valor vazio, sem confundir ausência de dado com XML inválido.
+            $versao=$aplicacao.GetAttribute('version').Trim()
+            if ([string]::IsNullOrWhiteSpace($versao)) {
+                Write-Log "DSU não informou a versão de '$($aplicacao.GetAttribute('display'))'. Entrada preservada; não será presumida uma versão instalada." 'AVISO'
             }
             # Preserva cada instância, inclusive discos iguais em baias diferentes.
             [pscustomobject]@{
                 Nome = $aplicacao.GetAttribute('display').Trim()
                 Tipo = $aplicacao.GetAttribute('componentType').Trim()
-                Versao = $aplicacao.GetAttribute('version').Trim()
+                Versao = $versao
                 ModeloDispositivo = $dispositivo.GetAttribute('display').Trim()
                 ComponentID = $dispositivo.GetAttribute('componentID').Trim()
                 FQDD = $dispositivo.GetAttribute('FQDD').Trim()
@@ -1294,6 +1300,13 @@ function New-SiteAssessmentRows {
                 New-DellDriverAssessmentRows -Base $resultado -Definicoes $definicoes -Inventario $Inventario -DriversWindows $DriversWindows -Downloads $Downloads -SO $SO
                 continue
             }
+        }
+        # Drivers com referência validada puderam usar o CIM acima. Para os
+        # demais casos, uma versão ausente nunca equivale a zero ou a atualizado.
+        if ([string]::IsNullOrWhiteSpace([string]$instalado.Versao)) {
+            $resultado.Motivo = 'O DSU não informou a versão instalada deste componente; não há comparação segura. Registro preservado para verificação manual.'
+            $resultado
+            continue
         }
         # Regras deliberadamente específicas: o título genérico de uma NIC/disco
         # e a versão do pacote não comprovam a versão do firmware de cada dispositivo.
@@ -1991,6 +2004,9 @@ function Merge-DellAutomaticFirmwareRows {
             $modeloConfirmado=@($m.Modelos | Where-Object {(($_ -replace '(?i)Dell|PowerEdge|[^A-Za-z0-9]','').ToLowerInvariant()) -eq $normal}).Count -gt 0
         }
         $cmp=Compare-DottedVersion $linha.VersaoAtual $m.Versao
+        if([string]::IsNullOrWhiteSpace([string]$linha.VersaoAtual)) {
+            $linha.Motivo='Pacote candidato associado por identidade de hardware, mas o DSU não informou a versão instalada; não é possível confirmar uma pendência.'
+        }
         if($modeloConfirmado -and @($m.ComponentIDs).Count -eq 1 -and ($m.WindowsConfirmado -or $m.IndependenteSO) -and $null -ne $cmp) {
             if($cmp -lt 0){$linha.Status='Pendente'}elseif($cmp -eq 0){$linha.Status='Atualizado na referência'}else{$linha.Status='Acima da referência'}
             $linha.Motivo='Associação automática por identidade de hardware, pacote de um único ComponentID e versão numérica vendorVersion; validar pré-requisitos antes de instalar.'
