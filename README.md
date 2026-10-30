@@ -108,6 +108,20 @@ Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O 
 
 **Escolher um candidato para baixar é uma pista para investigação, não uma confirmação de que ele serve.** Baixar e extrair também não garante resolver um inconclusivo. O script não instala as atualizações.
 
+#### O que ele lê depois de descompactar?
+
+O script lê **os metadados que descrevem o pacote**. São as informações que dizem qual atualização está ali, quais dispositivos ela atende e qual versão oferece.
+
+| Arquivo | O que o script procura |
+| --- | --- |
+| **`package.xml`** | Identificação e versão do pacote, tipo de componente, modelos de servidor e Windows atendidos, ComponentIDs e identificadores PCI dos dispositivos compatíveis. |
+| **Arquivos `.inf` de drivers**, quando disponíveis | Hardware atendido, classe do dispositivo, arquitetura/Windows compatível e **versão real do driver**, pelo campo `DriverVer`. Essa versão pode ser diferente da versão da suíte indicada no nome do download. |
+| **Alguns XML auxiliares reconhecidos** | Identificação da família do driver e seu nome no inventário. |
+
+Depois cruza esses dados com o **DSU e o CIM**, que informam o hardware e as versões instaladas. A presença de um arquivo XML/INF, sozinha, não confirma a correspondência: os identificadores, o Windows e as versões também precisam atender aos critérios de comparação.
+
+Antes da extração, o pacote passa pela conferência de SHA256 e assinatura digital Dell. A análise não executa os instaladores ou scripts internos do pacote. Quando os metadados ficam dentro de outro instalador, o formato não é reconhecido ou a comparação não pode ser comprovada, mantém o resultado inconclusivo.
+
 Exemplo validado no servidor de teste: o pacote **T244W** expôs XML e INF compatíveis com a identidade PCI da PERC H730P Mini. O CIM informou o driver instalado **6.603.6.0**, e o INF do pacote informou **6.604.06.00**. A análise automática identificou essa pendência sem cadastrar uma regra específica para T244W; o resultado passou de 12 para 13 pendências, mantendo cinco inconclusivos.
 
 Os parâmetros e os detalhes técnicos dessa investigação estão a seguir.
