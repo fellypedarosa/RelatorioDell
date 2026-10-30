@@ -1008,7 +1008,21 @@ function Get-BroadcomPciProfile {
 
 function Get-DellWindowsNetworkDrivers {
     # Consulta local de drivers de hardware. Não consulta Windows Update ou patches.
-    $drivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID LIKE 'PCI%'" -OperationTimeoutSec 30 -ErrorAction Stop)
+    $drivers=@()
+    for($tentativa=1;$tentativa -le 2;$tentativa++) {
+        try {
+            Write-Log "Consultando drivers PCI pelo CIM (tentativa $tentativa/2; timeout de operação: 60 segundos)."
+            # Só processa o conjunto após a consulta terminar. Dados parciais de
+            # uma tentativa interrompida não se misturam com os da próxima.
+            $drivers=@(Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID LIKE 'PCI%'" -OperationTimeoutSec 60 -ErrorAction Stop)
+            break
+        }
+        catch {
+            if($tentativa -eq 2){throw}
+            Write-Log "Consulta CIM falhou: $($_.Exception.Message). Nova tentativa em 2 segundos." 'AVISO'
+            Start-Sleep -Seconds 2
+        }
+    }
     foreach ($driver in $drivers) {
         $id = [string](Get-ObjectValue $driver 'DeviceID')
         if ($id -notmatch '(?i)^PCI\\VEN_(?<vendor>[0-9A-F]{4})&DEV_(?<device>[0-9A-F]{4})&SUBSYS_(?<subdevice>[0-9A-F]{4})(?<subvendor>[0-9A-F]{4})(?:&|\\|$)') { continue }
@@ -1744,6 +1758,7 @@ function Get-DellCachedPackageMetadata {
     param($Pacote, $Arquivo, [string]$Cache, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3,
         [string]$PastaDiagnostico, [System.Collections.IDictionary]$Estado)
     if($null -eq $Estado){$Estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}}
+    $Estado['AvisoLimpeza']=''
     if(([string](Get-ObjectValue $Arquivo 'SHA256')) -notmatch '^[A-Fa-f0-9]{64}$'){throw 'SHA256 não informado pela referência Dell; pacote não será executado.'}
     if($Arquivo.FileType -ne 'LW64'){throw 'Análise automática aceita DUP Windows x64 (LW64).'}
     [void](Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) ([string]$Arquivo.FileName))
@@ -1758,7 +1773,7 @@ function Get-DellCachedPackageMetadata {
     $lock=[IO.File]::Open((Join-Path $dir 'pacote.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     $extraido=Join-Path $dir ('extracao_'+[guid]::NewGuid().ToString('N'))
     $logs=$extraido+'.logs'
-    $exe=Join-Path $dir 'pacote.exe'; $novo=$null; $guard=$null; $origem='Cache'; $bytes=[int64]0
+    $exe=Join-Path $dir 'pacote.exe'; $novo=$null; $guard=$null; $origem='Cache'; $bytes=[int64]0; $erroAnalise=''
     try {
         $Estado['Origem']='Cache'
         if(Test-Path -LiteralPath $exe -PathType Leaf) {
@@ -1787,6 +1802,7 @@ function Get-DellCachedPackageMetadata {
         $meta=Get-DellAutomaticPackageMetadata $conteudo $Pacote $Arquivo $SO $LegendaSO $WindowsVersao $ProductType
         [pscustomobject]@{Metadados=$meta;Origem=$origem;BytesBaixados=$bytes;SHA256=[string]$Arquivo.SHA256;Assinante=$assinante}
     }
+    catch {$erroAnalise=$_.Exception.Message;throw}
     finally {
         try {
             if($guard){$guard.Dispose()}
@@ -1797,7 +1813,7 @@ function Get-DellCachedPackageMetadata {
                 try {
                     [void][IO.Directory]::CreateDirectory($PastaDiagnostico)
                     $copiados=$true
-                    foreach($nome in @('7zip.stdout.txt','7zip.stderr.txt','7zip.processo.json','dup.stdout.txt','dup.stderr.txt','dup.processo.json','dup.log')) {
+                    foreach($nome in @('7zip.stdout.txt','7zip.stderr.txt','7zip.processo.json','dup.stdout.txt','dup.stderr.txt','dup.processo.json','dup.log','limpeza.json')) {
                         $arquivoLog=Join-Path $logs $nome
                         if(-not (Test-Path -LiteralPath $arquivoLog -PathType Leaf)){continue}
                         $itemLog=Get-Item -LiteralPath $arquivoLog
@@ -1818,7 +1834,24 @@ function Get-DellCachedPackageMetadata {
                 if($seguro -and ((Get-Item -LiteralPath $alvo).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0){Remove-Item -LiteralPath $alvo -Recurse -Force}
             }
         }
-        finally {$lock.Dispose()}
+        catch {
+            # Uma falha no finally não pode substituir o resultado/erro real.
+            # Mantém os arquivos para inspeção; não amplia o alvo da remoção.
+            $Estado['AvisoLimpeza']=$_.Exception.Message
+            Write-Log "Limpeza temporária incompleta em $extraido. Resultado ou erro da análise preservado. $($Estado['AvisoLimpeza'])" 'AVISO'
+            $aviso=[ordered]@{DataHora=(Get-Date).ToString('o');DriverId=[string]$Pacote.DriverId;Extracao=$extraido;DownloadParcial=$novo;AvisoLimpeza=$Estado['AvisoLimpeza'];ErroAnalise=$erroAnalise}
+            foreach($pastaAviso in @($logs,$PastaDiagnostico | Where-Object {$_} | Select-Object -Unique)) {
+                try {
+                    [void][IO.Directory]::CreateDirectory($pastaAviso)
+                    [IO.File]::WriteAllText((Join-Path $pastaAviso 'limpeza.json'),(ConvertTo-Json $aviso -Depth 3),(New-Object Text.UTF8Encoding($true)))
+                }
+                catch {Write-Log "Não foi possível gravar aviso de limpeza em $pastaAviso. $($_.Exception.Message)" 'AVISO'}
+            }
+        }
+        finally {
+            try {$lock.Dispose()}
+            catch {Write-Log "Falha ao liberar o lock do cache: $($_.Exception.Message). Resultado ou erro da análise preservado." 'AVISO'}
+        }
     }
 }
 
@@ -1874,8 +1907,8 @@ function Get-DellAutomaticMetadata {
     $metadados=New-Object 'System.Collections.Generic.List[object]'
     $bytes=[int64]0; $reservado=[int64]0; $executados=0; $parcial=$false; $falhasRede=0
     foreach($c in $candidatos) {
-        $registro=[pscustomobject]@{DriverId=[string]$c.Pacote.DriverId;Pacote=[string]$c.Arquivo.FileName;Status='';Detalhe='';SHA256=[string](Get-ObjectValue $c.Arquivo 'SHA256');Origem='';Assinante='';BytesBaixados=[int64]0;Etapa='';Diagnostico='';Prioridade=$c.Prioridade;MotivoPrioridade=$c.Motivo}
-        $estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}
+        $registro=[pscustomobject]@{DriverId=[string]$c.Pacote.DriverId;Pacote=[string]$c.Arquivo.FileName;Status='';Detalhe='';SHA256=[string](Get-ObjectValue $c.Arquivo 'SHA256');Origem='';Assinante='';BytesBaixados=[int64]0;Etapa='';Diagnostico='';Prioridade=$c.Prioridade;MotivoPrioridade=$c.Motivo;AvisoLimpeza=''}
+        $estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico='';AvisoLimpeza=''}
         try {
             $reserva=if($c.Tamanho -gt 0){$c.Tamanho}else{512MB}
             $bloqueio=if($falhasRede -ge 3){'Análise interrompida após três falhas consecutivas de rede.'}elseif($executados -ge $Limite){'Limite de pacotes por execução.'}elseif($reservado+$reserva -gt 2GB){'Reserva de 2 GiB atingida.'}else{''}
@@ -1908,6 +1941,7 @@ function Get-DellAutomaticMetadata {
         finally {
             $registro.BytesBaixados=[int64]$estado.BytesBaixados;$bytes+=$registro.BytesBaixados
             $registro.Etapa=$estado.Etapa;$registro.Diagnostico=$estado.Diagnostico
+            $registro.AvisoLimpeza=[string]$estado.AvisoLimpeza
             if($estado.Origem){$registro.Origem=$estado.Origem}
             if($estado.Assinante){$registro.Assinante=$estado.Assinante}
             $auditoria.Add($registro)
@@ -2044,7 +2078,7 @@ try {
             $driversWindows = @(Get-DellWindowsNetworkDrivers)
             Write-Log "Drivers de dispositivos PCI coletados: $($driversWindows.Count). A comparação exige metadados de pacote Dell; sem Windows Update."
         }
-        catch { Write-Log "Não foi possível obter drivers de rede pelo CIM: $($_.Exception.Message). Os casos sem evidência permanecem inconclusivos." 'AVISO' }
+        catch { Write-Log "Não foi possível obter drivers de dispositivos PCI pelo CIM após duas tentativas: $($_.Exception.Message). Os casos sem evidência permanecem inconclusivos." 'AVISO' }
         [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'drivers-windows.json'), (ConvertTo-Json -InputObject @($driversWindows) -Depth 5), (New-Object Text.UTF8Encoding($true)))
         [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'inventory.normalizado.json'), (ConvertTo-Json -InputObject @($inventario) -Depth 5), (New-Object Text.UTF8Encoding($true)))
         Write-Log "Inventário interpretado: $($inventario.Count) componentes. Comparando com os downloads do site."

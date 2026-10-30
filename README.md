@@ -153,7 +153,7 @@ Limites, bloqueios HTTP e extrações parciais **não significam “sem atualiza
 
 #### Arquivos para auditoria
 
-- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade` e `BytesBaixados`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
+- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade`, `BytesBaixados` e `AvisoLimpeza`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
 - `pacotes-metadados.json`: ComponentIDs/PCI, versão do pacote, compatibilidade observada e referências dos INFs, com hashes do manifesto e dos INFs.
 - `drivers-referencias.json`: referências incorporadas/automáticas efetivamente usadas.
 - `_Verificacao.csv`: identidade, origem da versão e motivo de cada resultado; `TipoDSU` preserva o tipo original.
@@ -162,6 +162,8 @@ Limites, bloqueios HTTP e extrações parciais **não significam “sem atualiza
 O contador soma **bytes de conteúdo recebidos**, incluindo downloads parciais e arquivos cuja validação ou extração posterior falhou. Pacotes reutilizados do cache contam zero bytes de download. Ele não mede cabeçalhos ou todo o tráfego da conexão.
 
 As extrações exclusivas são limpas após a leitura, com conferência do caminho. Seus logs ficam em uma pasta local separada no cache (`extracao_<id>.logs`), preservada também em caso de falha, e são copiados para o diagnóstico da execução. Assim, o DUP pode registrar localmente mesmo quando a saída dos relatórios é UNC. Apenas nomes conhecidos e arquivos de até 20 MiB são copiados; se a cópia falhar ou ultrapassar esse limite, a auditoria informa o caminho local preservado. A limpeza do payload não apaga esses logs. Estruturas recusadas ou arquivos presos podem permanecer para inspeção. Não publique o cache no Git. O inventário e os dados CIM permanecem locais; a Dell recebe solicitações dos arquivos públicos e os dados normais da conexão.
+
+**Falha de limpeza não invalida a análise.** Se a remoção temporária falhar, o script mantém os metadados válidos e registra um aviso no log, em `AvisoLimpeza` no CSV de pacotes e em `limpeza.json` na pasta de logs do cache e no diagnóstico da execução, quando graváveis. Se a análise já tinha falhado, o erro original permanece em `Detalhe`; o erro secundário fica separado. O JSON registra ambos os erros e o caminho que permaneceu para inspeção. O script não amplia o alvo da remoção nem tenta apagar outras pastas para contornar a falha. Um aviso de limpeza, sozinho, não transforma metadados válidos em análise inconclusiva.
 
 ## 2. Como funciona a engine
 
@@ -268,7 +270,7 @@ Firmware usa somente o pacote DFF48 presente na referência selecionada, versão
 
 Para o **driver**, o coletor `nxUDUPconfig.xml` do 49X84 usa o ComponentID `8641`, consulta `HKLM\SOFTWARE\Dell\MUP\Broadcom\UInstaller\Product_Version` e tem `0.0.0` como valor padrão sem versão. Isso explica como um zero pode aparecer, mas não comprova qual condição ocorreu no Registro do servidor. O script não executa esse VBS nem depende dessa chave para decidir o estado do driver.
 
-A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. A consulta tem timeout de operação de 30 segundos; sua falha não é tratada como driver atualizado. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
+A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. Usa **timeout de operação de 60 segundos por tentativa**. Se falhar, registra o motivo, espera dois segundos e faz **uma única nova tentativa**; sucesso na primeira não repete a consulta. Dados parciais de uma tentativa interrompida não se misturam com os da seguinte. Após duas falhas, registra a falha da coleta e conserva como inconclusivos os casos sem evidência; não trata a falha como driver atualizado. Não reinicia serviços nem usa uma fonte diferente como substituição silenciosa. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
 
 As [notas oficiais do 49X84][broadcom-driver-notas] distinguem a família `21.80.3` do driver **NDIS `214.0.0.6`**. `VersaoAtual`/`VersaoNova` usam NDIS nessa linha; a versão zero original permanece em `VersaoDSU`. O nome do pacote continua contendo sua versão de família. O mapeamento validado é restrito a Windows Server 2016/2019. A coleta real recebida confirmou seis drivers `17.2.1.0`, provedor Microsoft, assinados segundo o CIM; o reprocessamento com a nova engine está registrado abaixo.
 
@@ -546,7 +548,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **162 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **166 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -616,7 +618,7 @@ As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, 
 
 ### Validação da obtenção automática de metadados
 
-A suíte offline tem **162 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
+A suíte offline tem **166 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
 
 Uma validação separada neste ambiente usou cinco DUPs reais obtidos pelos links/hashes do HAR: **49X84, DFF48, 99GP4, K5DP6 e H81H3**. SHA256 e assinatura Dell foram conferidos. O fluxo extraiu e interpretou os manifestos dos três primeiros por 7-Zip. Os dois últimos não expuseram o manifesto nessa via; a tentativa de `/s /e` foi recusada pelo Windows por exigir elevação na sessão do agente. A execução nativa como administrador permanece para validação no servidor de teste; não foi declarada como concluída aqui.
 
@@ -636,9 +638,17 @@ O teste seguinte conseguiu ler **10 manifestos** entre 30 pacotes examinados: se
 
 Os novos logs também revelaram um erro anterior à análise do conteúdo: **todas as 30 chamadas do 7-Zip retornaram código 7 e `Incorrect command line`**. Isso não comprova que os pacotes sejam incompatíveis com o 7-Zip. A chamada foi simplificada conforme o passo 4, retirando as opções `-bs*` e deixando as aspas nos caminhos. O aviso agora distingue erro de comando, falha do extrator e ausência de manifesto; a versão instalada passa a integrar o diagnóstico. Não se presume uma versão específica do 7-Zip no servidor a partir desses arquivos. A linha nova foi validada localmente com 7-Zip 26.05 e o DUP 49X84 real, com código zero e leitura do manifesto. A execução seguinte no servidor confirmou a chamada com **7-Zip 9.20**: as 30 chamadas retornaram código zero e 28 manifestos foram interpretados. Os dois pacotes K5DP6/H81H3 continuaram sem manifesto exposto e falharam na alternativa nativa. A análise derivou a referência do driver T244W pelo XML/INF e a associou ao hardware PCI local, aumentando de 12 para **13 pendências**, com cinco inconclusivos. Essa execução valida o cenário testado, não todas as versões do 7-Zip ou todos os formatos de DUP.
 
+### Robustez da coleta CIM e da limpeza temporária
+
+Um teste em outro servidor concluiu o inventário, mas a consulta de drivers CIM falhou com a mensagem `Desligando`; a consulta isolada posterior com timeout de 60 segundos retornou 92 dispositivos PCI. Isso não comprova a causa da falha anterior. O timeout e a tentativa adicional descritos acima são medidas de recuperação limitadas, aplicadas a qualquer modelo de servidor.
+
+Na mesma execução, DYYN1/VJWX0 foram extraídos com código zero, mas receberam o erro `A pasta não está vazia` após a extração. A finalização podia substituir o resultado ou erro da análise por um erro de limpeza. Agora a limpeza é tratada separadamente. Os testes simulam falha de remoção após metadados válidos e após uma falha de análise, verificando resultado, erro original, aviso persistido e liberação do lock. Também simulam falha CIM seguida de sucesso e duas falhas consecutivas, sem acessar CIM real no CI. Não se afirma que a causa da pasta ocupada tenha sido eliminada ou que essa correção já tenha sido validada no servidor.
+
+Para repetir a análise sem nova coleta do DSU, use `-ArquivoInventario` com o `inventory.xml` da pasta de diagnóstico gerada **nesse mesmo servidor**. A consulta CIM continua sendo feita localmente; o cache de pacotes é reutilizado e revalidado normalmente.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 162 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 166 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 

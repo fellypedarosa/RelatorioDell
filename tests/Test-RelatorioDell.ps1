@@ -1144,7 +1144,8 @@ Getting System Inventory ...
             [pscustomobject]@{DeviceID='ROOT\VMS_MP\0000';DeviceName='Virtual'},
             [pscustomobject]@{DeviceID='PCI\VEN_8086&DEV_1234&SUBSYS_12341028\OUTRO';DeviceName='Outro'}
         )
-        function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) $script:ClasseCimTeste=$ClassName; $script:FiltroCimTeste=$Filter; if($OperationTimeoutSec -ne 30){throw 'Timeout CIM incorreto.'}; $script:DriversCimTeste}
+        $script:ChamadasCimTeste=0
+        function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) $script:ChamadasCimTeste++;$script:ClasseCimTeste=$ClassName; $script:FiltroCimTeste=$Filter; if($OperationTimeoutSec -ne 60){throw 'Timeout CIM incorreto.'}; $script:DriversCimTeste}
         try {
             $r = @(Get-DellWindowsNetworkDrivers)
             Assert-Equal 'Win32_PnPSignedDriver' $script:ClasseCimTeste
@@ -1153,8 +1154,42 @@ Getting System Inventory ...
             Assert-Equal '1028' $r[0].SubVendorID
             Assert-Equal '0639' $r[0].SubDeviceID
             Assert-Equal '214.0.0.5' $r[0].Versao
+            Assert-Equal 1 $script:ChamadasCimTeste
         }
         finally {Remove-Item Function:\Get-CimInstance}
+    }
+    Test-Case 'CIM repete uma consulta interrompida sem misturar dados parciais' {
+        $script:ChamadasCimTeste=0;$script:PausasCimTeste=0
+        function Get-CimInstance {
+            param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+            $script:ChamadasCimTeste++
+            Assert-Equal 60 $OperationTimeoutSec
+            if($script:ChamadasCimTeste -eq 1){$script:DriversCimTeste[0];throw 'Consulta interrompida no teste'}
+            $script:DriversCimTeste[2]
+        }
+        function Start-Sleep {param($Seconds) Assert-Equal 2 $Seconds;$script:PausasCimTeste++}
+        try {
+            $r=@(Get-DellWindowsNetworkDrivers)
+            Assert-Equal 2 $script:ChamadasCimTeste
+            Assert-Equal 1 $script:PausasCimTeste
+            Assert-Equal 1 $r.Count
+            Assert-Equal '8086' $r[0].VendorID
+        }
+        finally {Remove-Item Function:\Get-CimInstance;Remove-Item Function:\Start-Sleep}
+    }
+    Test-Case 'Duas falhas CIM preservam erro final e nao geram dados de driver' {
+        $script:ChamadasCimTeste=0;$script:PausasCimTeste=0
+        function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) $script:ChamadasCimTeste++;throw "Falha CIM $($script:ChamadasCimTeste)"}
+        function Start-Sleep {param($Seconds) $script:PausasCimTeste++}
+        try {
+            $erro='';$r=@()
+            try {$r=@(Get-DellWindowsNetworkDrivers)}catch{$erro=$_.Exception.Message}
+            Assert-Equal 'Falha CIM 2' $erro
+            Assert-Equal 2 $script:ChamadasCimTeste
+            Assert-Equal 1 $script:PausasCimTeste
+            Assert-Equal 0 $r.Count
+        }
+        finally {Remove-Item Function:\Get-CimInstance;Remove-Item Function:\Start-Sleep}
     }
 
     $driversMicrosoft = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\drivers-windows-net-exemplo.json')))
@@ -1572,6 +1607,51 @@ Getting System Inventory ...
             $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
             Assert-Equal 'Cache' $r.Origem
             Assert-Equal 0 @(Get-ChildItem (Join-Path $cacheTeste $fileCache.SHA256) -Filter 'extracao_*' | Where-Object Name -notlike '*.logs').Count
+        }
+        Test-Case 'Falha na limpeza preserva metadados validos auditoria e libera lock' {
+            function Remove-Item {
+                param($LiteralPath,[switch]$Recurse,[switch]$Force)
+                if($Recurse -and (Split-Path -Leaf $LiteralPath) -match '^extracao_[0-9a-f]{32}$'){throw 'A pasta nao esta vazia. Falha simulada.'}
+                Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+            }
+            try {
+                $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+                $r=Get-DellAutomaticMetadata @($p) @() $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+                Assert-Equal 1 $r.Metadados.Count
+                Assert-Equal 1 $r.Metadados[0].DefinicoesDrivers.Count
+                Assert-True (-not $r.Parcial)
+                $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+                Assert-Equal 'Extraido' $csv[0].Status
+                Assert-True ($csv[0].AvisoLimpeza -match 'Falha simulada')
+                $aviso=Get-Content -LiteralPath (Join-Path $csv[0].Diagnostico 'limpeza.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                Assert-Equal '' $aviso.ErroAnalise
+                Assert-True (Test-Path -LiteralPath $aviso.Extracao -PathType Container)
+                $arquivoLock=Join-Path (Join-Path $cacheTeste $fileCache.SHA256) 'pacote.lock'
+                $lockTeste=[IO.File]::Open($arquivoLock,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+                $lockTeste.Dispose()
+            }
+            finally {Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item}
+        }
+        Test-Case 'Falha da analise nao e substituida por erro posterior da limpeza' {
+            $script:FalharExtracaoAuto=$true
+            function Remove-Item {
+                param($LiteralPath,[switch]$Recurse,[switch]$Force)
+                if($Recurse -and (Split-Path -Leaf $LiteralPath) -match '^extracao_[0-9a-f]{32}$'){throw 'Erro secundario de limpeza'}
+                Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+            }
+            try {
+                $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+                $r=Get-DellAutomaticMetadata @($p) @() $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+                Assert-True $r.Parcial
+                Assert-Equal 0 $r.Metadados.Count
+                $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+                Assert-Equal 'Falha simulada de extracao' $csv[0].Detalhe
+                Assert-Equal 'Erro secundario de limpeza' $csv[0].AvisoLimpeza
+                $aviso=Get-Content -LiteralPath (Join-Path $csv[0].Diagnostico 'limpeza.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                Assert-Equal 'Falha simulada de extracao' $aviso.ErroAnalise
+                Assert-Equal 'Erro secundario de limpeza' $aviso.AvisoLimpeza
+            }
+            finally {$script:FalharExtracaoAuto=$false;Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item}
         }
         Test-Case 'Download seguido de falha de extracao preserva bytes assinatura e log no relatorio' {
             $cacheFalha=Join-Path $cacheTeste 'falha'
