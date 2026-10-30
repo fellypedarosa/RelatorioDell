@@ -108,6 +108,20 @@ Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O 
 
 **Escolher um candidato para baixar é uma pista para investigação, não uma confirmação de que ele serve.** Baixar e extrair também não garante resolver um inconclusivo. O script não instala as atualizações.
 
+#### O que ele lê depois de descompactar?
+
+O script lê **os metadados que descrevem o pacote**. São as informações que dizem qual atualização está ali, quais dispositivos ela atende e qual versão oferece.
+
+| Arquivo | O que o script procura |
+| --- | --- |
+| **`package.xml`** | Identificação e versão do pacote, tipo de componente, modelos de servidor e Windows atendidos, ComponentIDs e identificadores PCI dos dispositivos compatíveis. |
+| **Arquivos `.inf` de drivers**, quando disponíveis | Hardware atendido, classe do dispositivo, arquitetura/Windows compatível e **versão real do driver**, pelo campo `DriverVer`. Essa versão pode ser diferente da versão da suíte indicada no nome do download. |
+| **Alguns XML auxiliares reconhecidos** | Identificação da família do driver e seu nome no inventário. |
+
+Depois cruza esses dados com o **DSU e o CIM**, que informam o hardware e as versões instaladas. A presença de um arquivo XML/INF, sozinha, não confirma a correspondência: os identificadores, o Windows e as versões também precisam atender aos critérios de comparação.
+
+Antes da extração, o pacote passa pela conferência de SHA256 e assinatura digital Dell. A análise não executa os instaladores ou scripts internos do pacote. Quando os metadados ficam dentro de outro instalador, o formato não é reconhecido ou a comparação não pode ser comprovada, mantém o resultado inconclusivo.
+
 Exemplo validado no servidor de teste: o pacote **T244W** expôs XML e INF compatíveis com a identidade PCI da PERC H730P Mini. O CIM informou o driver instalado **6.603.6.0**, e o INF do pacote informou **6.604.06.00**. A análise automática identificou essa pendência sem cadastrar uma regra específica para T244W; o resultado passou de 12 para 13 pendências, mantendo cinco inconclusivos.
 
 Os parâmetros e os detalhes técnicos dessa investigação estão a seguir.
@@ -153,7 +167,7 @@ Limites, bloqueios HTTP e extrações parciais **não significam “sem atualiza
 
 #### Arquivos para auditoria
 
-- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade` e `BytesBaixados`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
+- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade`, `BytesBaixados` e `AvisoLimpeza`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
 - `pacotes-metadados.json`: ComponentIDs/PCI, versão do pacote, compatibilidade observada e referências dos INFs, com hashes do manifesto e dos INFs.
 - `drivers-referencias.json`: referências incorporadas/automáticas efetivamente usadas.
 - `_Verificacao.csv`: identidade, origem da versão e motivo de cada resultado; `TipoDSU` preserva o tipo original.
@@ -162,6 +176,8 @@ Limites, bloqueios HTTP e extrações parciais **não significam “sem atualiza
 O contador soma **bytes de conteúdo recebidos**, incluindo downloads parciais e arquivos cuja validação ou extração posterior falhou. Pacotes reutilizados do cache contam zero bytes de download. Ele não mede cabeçalhos ou todo o tráfego da conexão.
 
 As extrações exclusivas são limpas após a leitura, com conferência do caminho. Seus logs ficam em uma pasta local separada no cache (`extracao_<id>.logs`), preservada também em caso de falha, e são copiados para o diagnóstico da execução. Assim, o DUP pode registrar localmente mesmo quando a saída dos relatórios é UNC. Apenas nomes conhecidos e arquivos de até 20 MiB são copiados; se a cópia falhar ou ultrapassar esse limite, a auditoria informa o caminho local preservado. A limpeza do payload não apaga esses logs. Estruturas recusadas ou arquivos presos podem permanecer para inspeção. Não publique o cache no Git. O inventário e os dados CIM permanecem locais; a Dell recebe solicitações dos arquivos públicos e os dados normais da conexão.
+
+**Falha de limpeza não invalida a análise.** Se a remoção temporária falhar, o script mantém os metadados válidos e registra um aviso no log, em `AvisoLimpeza` no CSV de pacotes e em `limpeza.json` na pasta de logs do cache e no diagnóstico da execução, quando graváveis. Se a análise já tinha falhado, o erro original permanece em `Detalhe`; o erro secundário fica separado. O JSON registra ambos os erros e o caminho que permaneceu para inspeção. O script não amplia o alvo da remoção nem tenta apagar outras pastas para contornar a falha. Um aviso de limpeza, sozinho, não transforma metadados válidos em análise inconclusiva.
 
 ## 2. Como funciona a engine
 
@@ -268,7 +284,7 @@ Firmware usa somente o pacote DFF48 presente na referência selecionada, versão
 
 Para o **driver**, o coletor `nxUDUPconfig.xml` do 49X84 usa o ComponentID `8641`, consulta `HKLM\SOFTWARE\Dell\MUP\Broadcom\UInstaller\Product_Version` e tem `0.0.0` como valor padrão sem versão. Isso explica como um zero pode aparecer, mas não comprova qual condição ocorreu no Registro do servidor. O script não executa esse VBS nem depende dessa chave para decidir o estado do driver.
 
-A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. A consulta tem timeout de operação de 30 segundos; sua falha não é tratada como driver atualizado. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
+A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. Usa **timeout de operação de 60 segundos por tentativa**. Se falhar, registra o motivo, espera dois segundos e faz **uma única nova tentativa**; sucesso na primeira não repete a consulta. Dados parciais de uma tentativa interrompida não se misturam com os da seguinte. Após duas falhas, registra a falha da coleta e conserva como inconclusivos os casos sem evidência; não trata a falha como driver atualizado. Não reinicia serviços nem usa uma fonte diferente como substituição silenciosa. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
 
 As [notas oficiais do 49X84][broadcom-driver-notas] distinguem a família `21.80.3` do driver **NDIS `214.0.0.6`**. `VersaoAtual`/`VersaoNova` usam NDIS nessa linha; a versão zero original permanece em `VersaoDSU`. O nome do pacote continua contendo sua versão de família. O mapeamento validado é restrito a Windows Server 2016/2019. A coleta real recebida confirmou seis drivers `17.2.1.0`, provedor Microsoft, assinados segundo o CIM; o reprocessamento com a nova engine está registrado abaixo.
 
@@ -420,6 +436,43 @@ Um componente pode aparecer com outro nome, fazer parte de um pacote que atende 
 
 Consulte a coluna **`Motivo`** do `_Verificacao.csv` para saber a razão de cada caso. Essa classificação exige revisão; não deve ser contada como componente atualizado nem como atualização pendente confirmada.
 
+#### Por que um pacote identificado ainda pode ser inconclusivo?
+
+**Encontrar um pacote candidato, confirmar o hardware e confirmar a necessidade de atualização são verificações diferentes.** O script pode preencher `VersaoNova`, `NomeDoPacote`, `URL` e `Criticidade` e ainda não ter evidência suficiente para marcar `Pendente`.
+
+| Situação | O que falta comprovar |
+| --- | --- |
+| Nenhum pacote associado | A lista consultada ou a cobertura do leitor pode não incluir uma referência utilizável. Isso não comprova que o componente esteja atualizado. |
+| Hardware ou escopo ambíguos | Nome semelhante, mesmo modelo de servidor ou pacote com vários dispositivos não comprovam a correspondência da variante instalada. |
+| Versão instalada ausente, zero ou coleta CIM interrompida | Falta uma versão instalada confiável. O script não a substitui pela versão oferecida no download. |
+| Versão da suíte diferente da versão do driver | É preciso comparar versões equivalentes; a família informada pelo DSU pode ser diferente do `DriverVer` usado pelo Windows. |
+| Firmware alfanumérico ou pacote com múltiplos ComponentIDs | A comparação genérica atual não presume a ordem dessas versões nem aplica a versão do pacote indistintamente a todos os componentes. |
+| Windows/arquitetura não confirmados ou referências conflitantes | Falta comprovar suporte ou escolher uma referência inequívoca. |
+| Extração, download ou leitura incompletos | Hash/assinatura recusados, HTTP, INF encapsulado, formato desconhecido e limites da etapa podem impedir a análise; os motivos ficam no diagnóstico. |
+
+**A criticidade pertence ao pacote candidato.** Se a Dell classificar o pacote como `Urgente`, esse valor pode aparecer em uma linha inconclusiva. Isso não transforma a linha em pendência confirmada nem confirma que o servidor deva instalar o pacote. Sem pacote ou classificação associados, a criticidade pode ficar vazia.
+
+**A origem da versão instalada também importa.** `VersaoDSU` preserva o valor original do inventário; `VersaoAtual` é o valor usado na comparação e pode vir do CIM, conforme `FonteVersao`. Para drivers reconhecidos, o CIM informa a versão instalada no Windows, e o INF/referência validada informa a versão disponível. Para BIOS/firmwares inventariados, normalmente a versão instalada vem do DSU. Por exemplo, suíte `20.2.0` e driver `17.4.0.0` não representam necessariamente a mesma escala de versão.
+
+#### Exemplo real: discos FJ23 e pacote FJ46
+
+No teste, os dois discos tinham modelo **HUC101812CSS204**, ComponentID **103498** e firmware instalado **FJ23**. O script associou o candidato **DYYN1/FJ46** pelos metadados; a [página oficial do pacote][hgst-fj46] também lista esse modelo e o PowerEdge R530.
+
+Mesmo assim, os discos permanecem inconclusivos: `FJ23` e `FJ46` são versões alfanuméricas, e o pacote declara vários ComponentIDs. A comparação automática genérica não considera suficiente remover o prefixo e comparar `23` com `46`. Variantes e revisões podem ter versões com aparência semelhante; a correspondência do modelo, sozinha, também não comprova o caminho de atualização nem os pré-requisitos do dispositivo instalado.
+
+**Mantém-se essa limitação para evitar falsos positivos.** Não foi criada uma ordenação alfanumérica genérica nem uma regra nova para FJ23 → FJ46. As regras restritas de outros discos, documentadas anteriormente, permanecem com seus pares explícitos. Neste caso há um candidato a verificar manualmente, não uma atualização descartada ou uma incompatibilidade comprovada.
+
+#### Como verificar e atualizar manualmente um inconclusivo
+
+1. **Leia a linha no `_Verificacao.csv`.** Confira `Motivo`, `FonteVersao`, versões, `ModeloDispositivo`, ComponentID, FQDD/baia e `URL`. Separe um problema de coleta/extração de uma limitação da regra de comparação.
+2. **Confirme o componente físico instalado.** Para discos atrás de RAID e outros firmwares, consulte o inventário do iDRAC: modelo exato, baia, número de peça e versão, quando disponíveis. Para drivers Windows, confira o dispositivo e a versão efetiva pelo CIM/Gerenciador de Dispositivos. Não compare a versão de uma suíte com a do driver individual.
+3. **Valide a página Dell do pacote candidato.** Confira os dispositivos e sistemas atendidos, Windows quando a execução for pelo SO, notas de versão, pré-requisitos, eventual versão intermediária e instruções de instalação. A página aberta pela Service Tag e a classificação `Urgente` não substituem essa validação. Sem `URL` associada, pesquise pelo modelo exato/número da peça do componente, além da identificação do servidor.
+4. **Para firmware com atualização pelo iDRAC suportada, examine antes de instalar.** No iDRAC 7/8, a Dell documenta `Overview → iDRAC Settings → Update and Rollback`: selecione o arquivo e faça `Upload`. Depois confira os dispositivos reconhecidos e as versões `Current`/`Available`. O upload e a instalação são etapas separadas. Reconhecer o arquivo não comprova, sozinho, todos os pré-requisitos ou que o caminho desde a versão instalada seja adequado. Veja o [procedimento oficial Dell][atualizacao-idrac].
+5. **Instale somente depois de confirmar a correspondência e os pré-requisitos.** Use o método indicado para aquele pacote (iDRAC/Lifecycle Controller ou instalador Dell no Windows), em janela de manutenção, com backup verificado e considerando eventuais reinicializações. Drivers Windows devem seguir suas instruções de instalação, não o fluxo de firmware do iDRAC. Os [métodos oficiais de atualização PowerEdge][metodos-dell] descrevem as alternativas. Se ainda faltar comprovação, mantenha a classificação inconclusiva e consulte a documentação/suporte Dell.
+6. **Confira o resultado após a manutenção.** Faça uma coleta nova do inventário e dos drivers, em vez de reutilizar o XML antigo. Se o script continuar sem suporte à comparação daquele formato, ele pode manter inconclusivo mesmo depois da atualização; registre a verificação manual e a versão confirmada.
+
+Esse procedimento orienta uma revisão humana. **O script continua apenas gerando relatórios; ele não instala os pacotes.**
+
 No modo Site, a linha **“Nenhuma atualização pendente”** exige ausência de pendências e de registros inconclusivos no inventário em escopo. Ela continua limitada ao que foi inventariado e à referência consultada; não é uma certificação de atualização completa do servidor.
 
 No modo automático, o diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodificada), `downloads-site.json` (registros efetivamente usados; filtrados por tag somente no modo experimental `ServiceTag`), `fonte-site.txt`, os textos de ajuda/inventário concluídos ou o arquivo importado. A fonte registra o tipo de consulta e as quantidades recebida/usada; o log registra horários, etapas e contagens. As saídas brutas de um processo só são gravadas depois do encerramento do processo e da captura dos pipes; podem não existir em uma falha por timeout.
@@ -546,7 +599,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **162 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **166 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -616,7 +669,7 @@ As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, 
 
 ### Validação da obtenção automática de metadados
 
-A suíte offline tem **162 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
+A suíte offline tem **166 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
 
 Uma validação separada neste ambiente usou cinco DUPs reais obtidos pelos links/hashes do HAR: **49X84, DFF48, 99GP4, K5DP6 e H81H3**. SHA256 e assinatura Dell foram conferidos. O fluxo extraiu e interpretou os manifestos dos três primeiros por 7-Zip. Os dois últimos não expuseram o manifesto nessa via; a tentativa de `/s /e` foi recusada pelo Windows por exigir elevação na sessão do agente. A execução nativa como administrador permanece para validação no servidor de teste; não foi declarada como concluída aqui.
 
@@ -636,9 +689,17 @@ O teste seguinte conseguiu ler **10 manifestos** entre 30 pacotes examinados: se
 
 Os novos logs também revelaram um erro anterior à análise do conteúdo: **todas as 30 chamadas do 7-Zip retornaram código 7 e `Incorrect command line`**. Isso não comprova que os pacotes sejam incompatíveis com o 7-Zip. A chamada foi simplificada conforme o passo 4, retirando as opções `-bs*` e deixando as aspas nos caminhos. O aviso agora distingue erro de comando, falha do extrator e ausência de manifesto; a versão instalada passa a integrar o diagnóstico. Não se presume uma versão específica do 7-Zip no servidor a partir desses arquivos. A linha nova foi validada localmente com 7-Zip 26.05 e o DUP 49X84 real, com código zero e leitura do manifesto. A execução seguinte no servidor confirmou a chamada com **7-Zip 9.20**: as 30 chamadas retornaram código zero e 28 manifestos foram interpretados. Os dois pacotes K5DP6/H81H3 continuaram sem manifesto exposto e falharam na alternativa nativa. A análise derivou a referência do driver T244W pelo XML/INF e a associou ao hardware PCI local, aumentando de 12 para **13 pendências**, com cinco inconclusivos. Essa execução valida o cenário testado, não todas as versões do 7-Zip ou todos os formatos de DUP.
 
+### Robustez da coleta CIM e da limpeza temporária
+
+Um teste em outro servidor concluiu o inventário, mas a consulta de drivers CIM falhou com a mensagem `Desligando`; a consulta isolada posterior com timeout de 60 segundos retornou 92 dispositivos PCI. Isso não comprova a causa da falha anterior. O timeout e a tentativa adicional descritos acima são medidas de recuperação limitadas, aplicadas a qualquer modelo de servidor.
+
+Na mesma execução, DYYN1/VJWX0 foram extraídos com código zero, mas receberam o erro `A pasta não está vazia` após a extração. A finalização podia substituir o resultado ou erro da análise por um erro de limpeza. Agora a limpeza é tratada separadamente. Os testes simulam falha de remoção após metadados válidos e após uma falha de análise, verificando resultado, erro original, aviso persistido e liberação do lock. Também simulam falha CIM seguida de sucesso e duas falhas consecutivas, sem acessar CIM real no CI. Não se afirma que a causa da pasta ocupada tenha sido eliminada ou que essa correção já tenha sido validada no servidor.
+
+Para repetir a análise sem nova coleta do DSU, use `-ArquivoInventario` com o `inventory.xml` da pasta de diagnóstico gerada **nesse mesmo servidor**. A consulta CIM continua sendo feita localmente; o cache de pacotes é reutilizado e revalidado normalmente.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 162 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 166 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 
@@ -697,3 +758,6 @@ Consultadas em **28 e 29/10/2026**. Diferencie a documentação pública dos pro
 [inf-driverver]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-driverver-directive
 [inf-manufacturer]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-manufacturer-section
 [inf-models]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-models-section
+
+[hgst-fj46]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=dyyn1
+[atualizacao-idrac]: https://www.dell.com/support/kbdoc/en-us/000134013/dell-poweredge-update-the-firmware-of-single-system-components-remotely-using-the-idrac
