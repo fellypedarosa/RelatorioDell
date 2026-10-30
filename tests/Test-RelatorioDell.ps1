@@ -1328,6 +1328,12 @@ Getting System Inventory ...
         Assert-True (-not $p.LinhaComando.StartsWith('"/s"'))
         Assert-Throws {Get-DellExtractionPlan 'C:\pacote.exe' 'C:\saida' '' 'C:\saida\dup.log'}
     }
+    Test-Case '7Zip usa sintaxe basica sem switches bs e preserva caminhos com espacos' {
+        $p=Get-DellExtractionPlan 'C:\pasta com espaco\pacote.exe' 'C:\saida com espaco' 'C:\7z.exe'
+        Assert-Equal 4 $p.Argumentos.Count
+        Assert-Equal 'x -y -o"C:\saida com espaco" "C:\pasta com espaco\pacote.exe"' $p.LinhaComando
+        Assert-True (($p.Argumentos -join ' ') -notmatch '-bs')
+    }
     Test-Case 'Extrator captura ajuda extensa stdout stderr e codigo sem bloquear pipes' {
         $prefixo=Join-Path $pastaTeste 'extrator-processo'
         $comando='[Console]::WriteLine(("x" * 100000)); [Console]::Error.WriteLine("erro de teste"); exit 10'

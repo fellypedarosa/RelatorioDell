@@ -1428,8 +1428,11 @@ function Save-DellPackageDownload {
 function Get-DellExtractionPlan {
     param([string]$Pacote, [string]$Pasta, [string]$SeteZip, [string]$ArquivoLog)
     if($SeteZip){
-        $argsZip=@('x','-y','-bso0','-bsp0','-bse0',('-o'+$Pasta),$Pacote)
-        return [pscustomobject]@{Executavel=$SeteZip;Argumentos=$argsZip;LinhaComando=(@($argsZip | ForEach-Object {ConvertTo-NativeArgument $_}) -join ' ');Metodo='7zip'}
+        # Opções básicas: versões antigas podem recusar -bs*. A saída já é
+        # capturada em arquivo; ocultá-la aqui também esconderia o erro real.
+        $argsZip=@('x','-y',('-o'+$Pasta),$Pacote)
+        return [pscustomobject]@{Executavel=$SeteZip;Argumentos=$argsZip
+            LinhaComando=('x -y -o'+(ConvertTo-NativeArgument $Pasta)+' '+(ConvertTo-NativeArgument $Pacote));Metodo='7zip'}
     }
     if(-not $ArquivoLog){$ArquivoLog=$Pasta+'.extracao.log'}
     $destino=[IO.Path]::GetFullPath($Pasta).TrimEnd('\')
@@ -1452,7 +1455,11 @@ function Invoke-DellExtractionProcess {
     $inicio.RedirectStandardInput=$true; $inicio.RedirectStandardOutput=$true; $inicio.RedirectStandardError=$true
     $processo=New-Object Diagnostics.Process; $processo.StartInfo=$inicio
     $saidaTask=$null; $erroTask=$null; $iniciado=$false; $codigo=$null
-    $registro=[ordered]@{Executavel=$inicio.FileName;Argumentos=$inicio.Arguments;Diretorio=$Diretorio;Inicio=(Get-Date).ToString('o');PID=$null;CodigoSaida=$null;CodigoHex='';Erro='';CapturaCompleta=$false}
+    $versaoExtrator=''
+    if([string](Get-ObjectValue $Plano 'Metodo') -eq '7zip'){
+        try {$versaoExtrator=[Diagnostics.FileVersionInfo]::GetVersionInfo($inicio.FileName).FileVersion}catch{}
+    }
+    $registro=[ordered]@{Executavel=$inicio.FileName;VersaoExtrator=$versaoExtrator;Argumentos=$inicio.Arguments;Diretorio=$Diretorio;Inicio=(Get-Date).ToString('o');PID=$null;CodigoSaida=$null;CodigoHex='';Erro='';CapturaCompleta=$false}
     $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
     try {
         [void]$processo.Start();$iniciado=$true;$registro.PID=$processo.Id
@@ -1509,7 +1516,9 @@ function Invoke-DellMetadataExtraction {
         if($seteZip -and $tentativa -eq 0) {
             $manifestos=@(Get-DellMetadataFiles $destino | Where-Object Name -ieq 'package.xml')
             if($codigo -ne 0 -or $manifestos.Count -eq 0) {
-                Write-Log 'Arquivo não exposto pelo 7-Zip; usando somente extração /s /e do DUP Dell validado.'
+                if($codigo -eq 7){Write-Log '7-Zip recusou a linha de comando (código 7); consulte 7zip.stdout.txt e 7zip.stderr.txt. Tentando somente extração /s /e do DUP validado.' 'AVISO'}
+                elseif($codigo -ne 0){Write-Log "7-Zip falhou (código $codigo); consulte os logs. Tentando somente extração /s /e do DUP validado." 'AVISO'}
+                else{Write-Log '7-Zip encerrou sem expor package.xml; tentando somente extração /s /e do DUP Dell validado.'}
                 continue
             }
         }
