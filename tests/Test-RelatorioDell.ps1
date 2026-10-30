@@ -1568,6 +1568,67 @@ Getting System Inventory ...
     $fwMeta=[pscustomobject]@{DriverId='FW123';Tipo='FRMW';Versao='2.0.0';ComponentIDs=@('555');PerfisPCI=@();WindowsConfirmado=$true;IndependenteSO=$false;Modelos=@()}
     $fwPkg=[pscustomobject]@{DriverId='FW123';Type='FRMW';DellVer='2.0.0';Imp='Urgent';ReleaseDate='01 Oct 2026';FileFrmtInfo=$autoFile}
     $fwLinha=[pscustomobject]@{Hostname='X';ServiceTag='Y';Modelo='PowerEdge R750';Componente='Firmware exemplo';Categoria='FRMW';ComponentID='555';VersaoAtual='1.0.0';VersaoNova='';NomeDoPacote='';Criticidade='';DataDeLancamento='';URL='';Status='Inconclusivo';Motivo=''}
+    Test-Case 'Motivo da versao distingue ausencia zero formato e intervalo numerico' {
+        Assert-True ((Get-DellVersionComparisonReason '' '1.0') -match 'não informou a versão instalada')
+        Assert-True ((Get-DellVersionComparisonReason '1.0' '') -match 'versão publicada')
+        Assert-True ((Get-DellVersionComparisonReason '0.0.0' '1.0') -match 'zero')
+        $motivo=Get-DellVersionComparisonReason '51.13.1-3662' '51.16.0-5150'
+        Assert-True ($motivo -match 'formato numérico pontuado' -and $motivo -match '51.13.1-3662' -and $motivo -match '51.16.0-5150')
+        Assert-True ((Get-DellVersionComparisonReason '18446744073709551616.0' '18446744073709551617.0') -match 'intervalo suportado')
+    }
+    Test-Case 'Motivo separa ausencia de candidato de candidato sem formato Windows aceito' {
+        $inv=@([pscustomobject]@{Nome='BIOS';Tipo='BIOS';Versao='1.0'})
+        $semPacote=@(New-SiteAssessmentRows $inv @() X Y 'PowerEdge exemplo' WS19L)
+        Assert-Equal 'Inconclusivo' $semPacote[0].Status
+        Assert-True ($semPacote[0].Motivo -match 'Nenhum download da lista consultada')
+        $pkg=$fwPkg.PSObject.Copy();$pkg.Type='BIOS';$pkg.FileFrmtInfo=[pscustomobject]@{FileName='teste.BIN';FileType='LIN64'}
+        $semWindows=@(New-SiteAssessmentRows $inv @($pkg) X Y 'PowerEdge exemplo' WS19L)
+        Assert-Equal 'Inconclusivo' $semWindows[0].Status
+        Assert-True ($semWindows[0].Motivo -match 'Há 1 download' -and $semWindows[0].Motivo -match 'LW64/LWXP')
+    }
+    Test-Case 'Motivo automatico enumera multiplos bloqueios sem declarar incompatibilidade' {
+        $m=$fwMeta.PSObject.Copy();$m.ComponentIDs=@('555','556');$m.WindowsConfirmado=$false
+        $r=@(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($m) @($fwPkg) 'PowerEdge R750')
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-Equal '2.0.0' $r[0].VersaoNova
+        Assert-True ($r[0].Motivo -match 'FW123' -and $r[0].Motivo -match '2 ComponentIDs')
+        Assert-True ($r[0].Motivo -match 'Windows não confirmado' -and $r[0].Motivo -match 'não comprova incompatibilidade')
+        Assert-True ($r[0].Motivo -notmatch 'fora do formato')
+    }
+    Test-Case 'Motivo automatico explicita versoes alfanumericas sem ordenar firmware' {
+        $l=$fwLinha.PSObject.Copy();$l.VersaoAtual='F004'
+        $m=$fwMeta.PSObject.Copy();$m.Versao='F005'
+        $r=@(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) 'PowerEdge R750')
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-True ($r[0].Motivo -match 'F004' -and $r[0].Motivo -match 'F005' -and $r[0].Motivo -match 'formato numérico pontuado')
+    }
+    Test-Case 'Motivo de referencia automatica ambigua informa data versoes e pacotes' {
+        $outra=$fwMeta.PSObject.Copy();$outra.Versao='3.0.0'
+        $r=@(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($fwMeta,$outra) @($fwPkg) 'PowerEdge R750')
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-True ($r[0].Motivo -match 'ambígua' -and $r[0].Motivo -match '2026-10-01')
+        Assert-True ($r[0].Motivo -match '2.0.0' -and $r[0].Motivo -match '3.0.0' -and $r[0].Motivo -match 'FW123')
+    }
+    Test-Case 'Motivo de driver sem INF reconhece evidencia de ComponentID sem alterar outros campos' {
+        $l=[pscustomobject]@{TipoDSU='DRVR';Categoria='DRVR';Status='Inconclusivo';ComponentID='888';Componente='Driver exemplo';VersaoAtual='1.0.0';VersaoNova='';Motivo='Sem regra'}
+        $m=[pscustomobject]@{Tipo='DRVR';DriverId='DRVXX';ComponentIDs=@('888');DefinicoesDrivers=@();WindowsConfirmado=$true}
+        $antes=ConvertTo-Json ($l | Select-Object * -ExcludeProperty Motivo) -Compress
+        $r=@(Set-DellInconclusiveDriverReasons @($l) @($m) @())
+        Assert-Equal $antes (ConvertTo-Json ($r[0] | Select-Object * -ExcludeProperty Motivo) -Compress)
+        Assert-True ($r[0].Motivo -match 'ComponentID 888' -and $r[0].Motivo -match 'DRVXX' -and $r[0].Motivo -match 'INFs')
+        Assert-True ($r[0].Motivo -match 'versão da suíte não foi tomada')
+    }
+    Test-Case 'Detalhamento de driver preserva falhas CIM e resultados conclusivos' {
+        $l=[pscustomobject]@{TipoDSU='DRVR';Categoria='DRVR';Status='Inconclusivo';ComponentID='888';Componente='Driver exemplo';VersaoAtual='1.0.0';Motivo='CIM indisponível'}
+        $m=[pscustomobject]@{Tipo='DRVR';DriverId='DRVXX';ComponentIDs=@('888');DefinicoesDrivers=@();WindowsConfirmado=$true}
+        $def=[pscustomobject]@{ComponentIDs=@('888');NomeInventario='Driver exemplo'}
+        $r=@(Set-DellInconclusiveDriverReasons @($l) @($m) @($def))
+        Assert-Equal 'CIM indisponível' $r[0].Motivo
+        $l.Status='Pendente';$l.Motivo='Pendência já confirmada'
+        $r=@(Set-DellInconclusiveDriverReasons @($l) @($m) @())
+        Assert-Equal 'Pendente' $r[0].Status
+        Assert-Equal 'Pendência já confirmada' $r[0].Motivo
+    }
     Test-Case 'Firmware automatico usa ComponentID e versoes numericas sem depender do modelo' {
         $r=@(Merge-DellAutomaticFirmwareRows @($fwLinha.PSObject.Copy()) @($fwMeta) @($fwPkg) 'PowerEdge R750')
         Assert-Equal 'Pendente' $r[0].Status
@@ -1612,7 +1673,9 @@ Getting System Inventory ...
     Test-Case 'BIOS com ComponentID igual mas modelo diferente permanece inconclusivo' {
         $l=$fwLinha.PSObject.Copy();$l.Categoria='BIOS'
         $m=$fwMeta.PSObject.Copy();$m.Tipo='BIOS';$m.Modelos=@('PowerEdge R350')
-        Assert-Equal 'Inconclusivo' @(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) 'PowerEdge R750')[0].Status
+        $r=@(Merge-DellAutomaticFirmwareRows @($l) @($m) @($fwPkg) 'PowerEdge R750')
+        Assert-Equal 'Inconclusivo' $r[0].Status
+        Assert-True ($r[0].Motivo -match "modelo 'PowerEdge R750' não confirmado")
     }
 
     # Isola rede/assinatura/extração para testar cache sem executar código de fornecedor.

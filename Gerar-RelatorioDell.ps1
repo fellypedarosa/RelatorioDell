@@ -1003,6 +1003,21 @@ function Compare-DottedVersion {
     return 0
 }
 
+function Get-DellVersionComparisonReason {
+    param([string]$Instalada, [string]$Disponivel)
+    # Apenas explica uma comparação já recusada; não cria outra ordem de versões.
+    if([string]::IsNullOrWhiteSpace($Instalada)){return 'O DSU não informou a versão instalada; não há comparação segura.'}
+    if([string]::IsNullOrWhiteSpace($Disponivel)){return 'O pacote candidato não informou uma versão publicada utilizável.'}
+    $detalhe="Instalada='$Instalada'; disponível='$Disponivel'."
+    if($Instalada -match '^0+(?:\.0+)*$' -or $Disponivel -match '^0+(?:\.0+)*$'){
+        return "Uma das versões é zero e não representa uma versão válida para esta comparação. $detalhe"
+    }
+    if($Instalada -notmatch '^\d+(?:\.\d+){1,7}$' -or $Disponivel -notmatch '^\d+(?:\.\d+){1,7}$'){
+        return "Versões fora do formato numérico pontuado aceito pela regra genérica (letras, hífen ou outro formato). $detalhe"
+    }
+    return "Não foi possível comparar os segmentos numéricos dentro do intervalo suportado. $detalhe"
+}
+
 function Get-BroadcomPciProfile {
     param($Dispositivo)
     # Tuplas completas confirmadas em SupportedDevices do DUP oficial DFF48/49X84.
@@ -1333,15 +1348,18 @@ function New-SiteAssessmentRows {
             $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverId -eq 'DFF48' -and $_.DriverName -match '(?i)Broadcom.*NetXtreme(?!-E)' })
         }
         else {
-            $resultado.Motivo = 'Não há regra validada para associar a identidade deste dispositivo e sua versão ao pacote Dell. Consulte os identificadores no CSV de verificação; ausência de regra não significa ausência de atualização.'
-            if ($instalado.Versao -match '^0+(?:\.0+)*$') { $resultado.Motivo = 'DSU informou versão zero; não é uma versão instalada válida para comparação.' }
+            $identidade=if($resultado.ComponentID){'ComponentID='+$resultado.ComponentID}elseif(Get-PciDeviceKey $resultado){'PCI='+(Get-PciDeviceKey $resultado)}else{'sem ComponentID/PCI completo'}
+            $resultado.Motivo = "Não há regra validada de associação para o tipo $($instalado.Tipo) e esta identidade ($identidade) nos dados avaliados. Isso não comprova ausência de atualização."
+            if ($instalado.Versao -match '^0+(?:\.0+)*$') { $resultado.Motivo += " O DSU também informou versão zero ('$($instalado.Versao)'), não comparável." }
             $resultado
             continue
         }
         # Exige DUP Windows. Não toma um PDF, assinatura ou pacote Linux como update.
+        $candidatosAntesDoFormato=$candidatos.Count
         $candidatos = @($candidatos | Where-Object { $null -ne (Get-SiteWindowsPackage $_) })
         if ($candidatos.Count -eq 0) {
-            $resultado.Motivo = 'Não foi encontrado um pacote Windows com associação confirmada a este componente. Ausência na lista não comprova que está atualizado.'
+            if($candidatosAntesDoFormato -gt 0){$resultado.Motivo="Há $candidatosAntesDoFormato download(s) que correspondem à regra do componente, mas nenhum contém .EXE Windows LW64/LWXP aceito pelo script."}
+            else{$resultado.Motivo="Nenhum download da lista consultada correspondeu à regra de identificação deste componente ($($instalado.Tipo)). Não foi confirmado um pacote; isso não comprova que esteja atualizado."}
             $resultado
             continue
         }
@@ -1350,7 +1368,8 @@ function New-SiteAssessmentRows {
         $mesmaData = @($ordenados | Where-Object { (Get-SiteReleaseDate $_) -eq $ultimaData })
         $versoes = @($mesmaData | ForEach-Object { ([string]$_.DellVer -split ',')[0].Trim() } | Select-Object -Unique)
         if ($ultimaData -eq [datetime]::MinValue -or $versoes.Count -ne 1) {
-            $resultado.Motivo = 'Datas inválidas ou mais de uma versão candidata na mesma data. Associação ambígua.'
+            if($ultimaData -eq [datetime]::MinValue){$resultado.Motivo='Nenhum candidato possui data de lançamento interpretável para selecionar a referência.'}
+            else{$resultado.Motivo="Associação ambígua: versões diferentes na data $($ultimaData.ToString('yyyy-MM-dd')): $($versoes -join ', ')."}
             $resultado
             continue
         }
@@ -1373,12 +1392,12 @@ function New-SiteAssessmentRows {
         $resultado.URL = 'https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid=' + $pacote.DriverId
         if ($null -ne $regraDisco) { $comparacao = Compare-DellDiskVersion -Regra $regraDisco -Instalada $instalado.Versao -Disponivel $nova }
         else { $comparacao = Compare-DottedVersion -Instalada $resultado.VersaoAtual -Disponivel $nova }
-        if ($null -eq $comparacao) { $resultado.Motivo = 'Versões alfanuméricas, zero ou formatos não comparáveis automaticamente.' }
+        if ($null -eq $comparacao) { $resultado.Motivo = Get-DellVersionComparisonReason $resultado.VersaoAtual $nova }
         elseif ($comparacao -lt 0) { $resultado.Status = 'Pendente'; $resultado.Motivo = 'Componente identificado; versão instalada inferior à versão publicada na referência consultada.' }
         elseif ($comparacao -eq 0) { $resultado.Status = 'Atualizado na referência'; $resultado.Motivo = 'A versão instalada coincide com a versão publicada na referência consultada.' }
         else { $resultado.Status = 'Acima da referência'; $resultado.Motivo = 'A versão instalada é superior à referência consultada; não sugerir downgrade.' }
         if ($null -ne $regraDisco) {
-            if ($null -eq $comparacao) { $resultado.Motivo = 'Disco associado, mas o par de versões não consta na regra validada; não é usada ordem alfabética para firmware.' }
+            if ($null -eq $comparacao) { $resultado.Motivo = "Disco associado, mas o par de versões '$($instalado.Versao)' → '$nova' não consta na regra validada; não é usada ordem alfabética para firmware." }
             else { $resultado.Motivo += ' Regra local por modelo, ComponentID, FQDD, DriverId e par de versões explícito; validar aplicabilidade e pré-requisitos do DUP antes de instalar.' }
         }
         if ($modoBroadcom -eq 'Firmware') {
@@ -1989,7 +2008,12 @@ function Merge-DellAutomaticFirmwareRows {
         }
         $recentes=@($matches | Where-Object Data -eq $ultima)
         $versoes=@($recentes | ForEach-Object {$_.Meta.Versao} | Select-Object -Unique)
-        if($ultima -eq [datetime]::MinValue -or $versoes.Count -ne 1){$linha.Status='Inconclusivo';$linha.Motivo='Metadados automáticos encontraram referências ambíguas.';$linha;continue}
+        if($ultima -eq [datetime]::MinValue -or $versoes.Count -ne 1){
+            $linha.Status='Inconclusivo'
+            if($ultima -eq [datetime]::MinValue){$linha.Motivo='Pacotes associados por identidade, mas sem data interpretável para selecionar a referência automática.'}
+            else{$linha.Motivo="Referência automática ambígua: versões $($versoes -join ', ') na data $($ultima.ToString('yyyy-MM-dd')); pacotes $((@($recentes | ForEach-Object {$_.Meta.DriverId} | Select-Object -Unique)) -join ', ')."}
+            $linha;continue
+        }
         $m=$recentes[0].Meta; $p=$recentes[0].Pacote
         $linha.Status='Inconclusivo'
         $arquivo=Get-SiteWindowsPackage $p
@@ -1997,19 +2021,49 @@ function Merge-DellAutomaticFirmwareRows {
         $linha.Criticidade=ConvertTo-CriticalityLabel ([string]$p.Imp)
         $linha.DataDeLancamento=$ultima.ToString('yyyy-MM-dd')
         $linha.URL='https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid='+$p.DriverId
-        $linha.Motivo='Pacote associado automaticamente por ComponentID/PCI; falta comprovar equivalência da versão, SO ou escopo do pacote.'
         $modeloConfirmado=$true
         if($tipo -eq 'BIOS' -or @($m.Modelos).Count) {
             $normal=($Modelo -replace '(?i)Dell|PowerEdge|[^A-Za-z0-9]','').ToLowerInvariant()
             $modeloConfirmado=@($m.Modelos | Where-Object {(($_ -replace '(?i)Dell|PowerEdge|[^A-Za-z0-9]','').ToLowerInvariant()) -eq $normal}).Count -gt 0
         }
         $cmp=Compare-DottedVersion $linha.VersaoAtual $m.Versao
-        if([string]::IsNullOrWhiteSpace([string]$linha.VersaoAtual)) {
-            $linha.Motivo='Pacote candidato associado por identidade de hardware, mas o DSU não informou a versão instalada; não é possível confirmar uma pendência.'
-        }
         if($modeloConfirmado -and @($m.ComponentIDs).Count -eq 1 -and ($m.WindowsConfirmado -or $m.IndependenteSO) -and $null -ne $cmp) {
             if($cmp -lt 0){$linha.Status='Pendente'}elseif($cmp -eq 0){$linha.Status='Atualizado na referência'}else{$linha.Status='Acima da referência'}
             $linha.Motivo='Associação automática por identidade de hardware, pacote de um único ComponentID e versão numérica vendorVersion; validar pré-requisitos antes de instalar.'
+        }
+        else {
+            # Explica TODAS as condições que falharam no mesmo critério acima.
+            # Não substitui as condições por uma política mais permissiva.
+            $impedimentos=New-Object 'System.Collections.Generic.List[string]'
+            if(-not $modeloConfirmado){$impedimentos.Add("modelo '$Modelo' não confirmado na lista de sistemas interpretada do pacote")}
+            $quantidadeIDs=@($m.ComponentIDs).Count
+            if($quantidadeIDs -ne 1){$impedimentos.Add("pacote declara $quantidadeIDs ComponentIDs; a regra genérica exige exatamente um, sem escopo de versão por dispositivo validado")}
+            if(-not ($m.WindowsConfirmado -or $m.IndependenteSO)){$impedimentos.Add('Windows não confirmado pelo leitor dos metadados e pacote não reconhecido como independente de SO; isso não comprova incompatibilidade')}
+            if($null -eq $cmp){$impedimentos.Add((Get-DellVersionComparisonReason $linha.VersaoAtual $m.Versao))}
+            $linha.Motivo="Pacote $($m.DriverId) associado por identidade de hardware. Impedimentos: $(($impedimentos -join ' | ').TrimEnd('.'))."
+        }
+        $linha
+    }
+}
+
+function Set-DellInconclusiveDriverReasons {
+    param([object[]]$Linhas, [object[]]$Metadados, [object[]]$DefinicoesDrivers)
+    # Enriquece somente o texto. Não associa versões nem muda Status/pacote.
+    foreach($linha in $Linhas) {
+        $tipo=[string](Get-ObjectValue $linha 'TipoDSU')
+        if(-not $tipo){$tipo=[string]$linha.Categoria}
+        $cid=[string](Get-ObjectValue $linha 'ComponentID')
+        if($linha.Status -ne 'Inconclusivo' -or $tipo -ne 'DRVR' -or -not $cid){$linha;continue}
+        $regras=@($DefinicoesDrivers | Where-Object {($cid -in $_.ComponentIDs) -or ($_.NomeInventario -eq $linha.Componente)})
+        if($regras.Count){$linha;continue} # Preserva motivos de CIM/assinatura/referência já validados.
+        $candidatos=@($Metadados | Where-Object {$_.Tipo -eq 'DRVR' -and $cid -in $_.ComponentIDs -and @($_.DefinicoesDrivers).Count -eq 0})
+        if($candidatos.Count) {
+            $ids=@($candidatos | ForEach-Object {$_.DriverId} | Select-Object -Unique)
+            $motivo="ComponentID $cid aparece nos metadados dos pacotes $($ids -join ', '), mas não foi derivada referência de driver utilizável pelos INFs (ausentes, encapsulados ou não interpretáveis). A versão da suíte não foi tomada como versão do driver instalado."
+            if(@($candidatos | Where-Object WindowsConfirmado -eq $true).Count -eq 0){$motivo+=' O leitor também não confirmou o Windows nos metadados desses pacotes; isso não comprova incompatibilidade.'}
+            if([string]::IsNullOrWhiteSpace([string]$linha.VersaoAtual)){$motivo+=' O DSU não informou a versão instalada.'}
+            elseif($linha.VersaoAtual -match '^0+(?:\.0+)*$'){$motivo+=' O DSU informou versão zero.'}
+            $linha.Motivo=$motivo
         }
         $linha
     }
@@ -2113,6 +2167,7 @@ try {
                 $verificacoes=@(New-SiteAssessmentRows -Inventario $inventario -Downloads $dadosSite.DriverListData -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo -SO $so -DriversWindows $driversWindows -MetadadosDrivers $defs)
             }
             $verificacoes=@(Merge-DellAutomaticFirmwareRows -Linhas $verificacoes -Metadados $auto.Metadados -Downloads $dadosSite.DriverListData -Modelo $modelo)
+            $verificacoes=@(Set-DellInconclusiveDriverReasons -Linhas $verificacoes -Metadados $auto.Metadados -DefinicoesDrivers $defs)
             if($auto.Parcial) {
                 Write-Log 'Análise de pacotes parcial: consulte pacotes-analise.csv. Downloads recusados/limitados não comprovam ausência de atualizações.' 'AVISO'
                 if(@($verificacoes | Where-Object Status -eq 'Inconclusivo').Count -eq 0) {
