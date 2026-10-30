@@ -11,23 +11,28 @@ Script para executar no próprio Windows Server e gerar um relatório de **BIOS,
 
 ## Como usar
 
-**Você precisa de:** Windows PowerShell 5.1, sessão de administrador, DSU instalado para uma coleta nova e acesso à Dell para consultas/downloads. O 7-Zip é opcional; sem ele, o script tenta a extração nativa dos pacotes.
+**Antes de executar, prepare o servidor e o arquivo HAR:**
 
-Copie `Gerar-RelatorioDell.ps1` para uma pasta do servidor. Abra o PowerShell **como administrador**, entre nessa pasta e escolha uma das opções:
+1. **Confira a Service Tag do servidor e o Windows instalado.** A tag pode ser consultada no iDRAC, no BIOS ou na etiqueta do equipamento. Use os dados do servidor que será analisado.
+2. **Acesse o [suporte Dell](https://www.dell.com/support/home/pt-br), informe essa Service Tag e abra Drivers e downloads.** Selecione o Windows Server realmente instalado; deixe categoria e data em Todas/All.
+3. **Exporte a lista em um arquivo HAR.** No Edge/Chrome, abra `F12 → Rede/Network` antes de recarregar a lista, aguarde o carregamento e exporte o HAR sanitizado com o conteúdo das respostas. Salve como `DownloadsDell.har`. O arquivo é exportado pela guia Rede; não é o botão Download Selected. Veja o [passo a passo da captura](docs/Importacao-Manual-Dell.md).
+4. **Confira se o 7-Zip está instalado no servidor.** O script procura `7z.exe` em `Program Files\7-Zip`. Ele é opcional: sem ele, o script tenta a extração nativa do pacote Dell. Algumas extrações ainda podem ficar inconclusivas; sua ausência não deve ser confundida com servidor atualizado.
+5. **Confira se o Dell System Update (DSU) está instalado.** Ele é usado para coletar o inventário local. Se precisar instalá-lo, siga a [documentação Dell do DSU][dsu] e confira a compatibilidade com o modelo e o Windows. Para reaproveitar um inventário já coletado no mesmo servidor, veja `-ArquivoInventario` na execução detalhada.
+6. **Copie o script e o HAR para uma pasta do servidor.** É necessário Windows PowerShell **5.1**, acesso HTTPS à Dell para os downloads e uma sessão **como administrador**.
 
-**Consulta automática por modelo + Windows:**
-
-```powershell
-.\Gerar-RelatorioDell.ps1
-```
-
-**Usando a lista salva do site Dell:** coloque também o HAR na pasta e execute:
+Depois dessas verificações, abra o PowerShell como administrador, entre na pasta dos dois arquivos e execute:
 
 ```powershell
 .\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har'
 ```
 
-O HAR deve corresponder ao modelo e Windows desse servidor. Veja [como exportar o HAR](docs/Importacao-Manual-Dell.md). No modo padrão, a Service Tag identifica o servidor no relatório; a consulta não é filtrada automaticamente por ela.
+O HAR deve corresponder ao modelo e Windows desse servidor. No modo padrão, a Service Tag identifica o servidor no relatório; abrir o site pela tag não comprova que a lista esteja filtrada por ela. O script ainda cruza os pacotes com o hardware instalado.
+
+**Alternativa sem HAR:** o script também pode consultar automaticamente os downloads por modelo + Windows. Nesse caso, a exportação do HAR não é necessária:
+
+```powershell
+.\Gerar-RelatorioDell.ps1
+```
 
 A pasta **`Relatorios` é criada automaticamente ao lado do script**. A primeira execução pode demorar mais por causa do inventário e dos downloads; os pacotes em cache são reutilizados e validados nas próximas execuções.
 
