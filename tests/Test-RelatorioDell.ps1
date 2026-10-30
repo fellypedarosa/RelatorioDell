@@ -1322,6 +1322,73 @@ Getting System Inventory ...
         Assert-Equal 'C:\7z.exe' $p.Executavel
         Assert-Equal 'x' $p.Argumentos[0]
     }
+    Test-Case 'Linha DUP segue sintaxe Dell e log nunca ocupa o destino de extracao' {
+        $p=Get-DellExtractionPlan 'C:\pacote.exe' 'C:\saida com espaco'
+        Assert-Equal '/s /e="C:\saida com espaco" /l="C:\saida com espaco.extracao.log"' $p.LinhaComando
+        Assert-True (-not $p.LinhaComando.StartsWith('"/s"'))
+        Assert-Throws {Get-DellExtractionPlan 'C:\pacote.exe' 'C:\saida' '' 'C:\saida\dup.log'}
+    }
+    Test-Case 'Extrator captura ajuda extensa stdout stderr e codigo sem bloquear pipes' {
+        $prefixo=Join-Path $pastaTeste 'extrator-processo'
+        $comando='[Console]::WriteLine(("x" * 100000)); [Console]::Error.WriteLine("erro de teste"); exit 10'
+        $plano=[pscustomobject]@{Executavel=(Join-Path $PSHOME 'powershell.exe');LinhaComando=('-NoProfile -NonInteractive -Command '+(ConvertTo-NativeArgument $comando))}
+        $codigo=Invoke-DellExtractionProcess $plano $pastaTeste $prefixo 30
+        Assert-Equal 10 $codigo
+        Assert-True ((Get-Content -LiteralPath ($prefixo+'.stdout.txt') -Raw -Encoding UTF8).Length -gt 100000)
+        Assert-True ((Get-Content -LiteralPath ($prefixo+'.stderr.txt') -Raw -Encoding UTF8) -match 'erro de teste')
+        $registro=Get-Content -LiteralPath ($prefixo+'.processo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal 10 $registro.CodigoSaida
+        Assert-True $registro.CapturaCompleta
+        Assert-Equal $plano.LinhaComando $registro.Argumentos
+    }
+    Test-Case 'Falha ao iniciar extrator preserva erro e comando no diagnostico' {
+        $prefixo=Join-Path $pastaTeste 'extrator-ausente'
+        $plano=[pscustomobject]@{Executavel=(Join-Path $pastaTeste 'nao-existe.exe');LinhaComando='/s /e="pasta"'}
+        Assert-Throws {Invoke-DellExtractionProcess $plano $pastaTeste $prefixo 5}
+        $registro=Get-Content -LiteralPath ($prefixo+'.processo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True (-not [string]::IsNullOrEmpty($registro.Erro))
+        Assert-Equal $plano.LinhaComando $registro.Argumentos
+    }
+    Test-Case 'Termos genericos de firmware nao dao prioridade a outra familia de componente' {
+        $inventario=@([pscustomobject]@{Nome='13G SEP Firmware, BayID: 1';Tipo='FRMW';ComponentID='555'})
+        $v=@([pscustomobject]@{Componente=$inventario[0].Nome;Categoria='FRMW';TipoDSU='FRMW';ComponentID='555';Status='Inconclusivo'})
+        $p=[pscustomobject]@{DriverName='Network firmware para dispositivo ficticio';Type='FRMW'}
+        Assert-Equal 0 (Get-DellPackagePriority $p $inventario $v).Prioridade
+        $p.DriverName='Firmware para backplane de servidor ficticio'
+        Assert-True ((Get-DellPackagePriority $p $inventario $v).Prioridade -gt 0)
+    }
+    Test-Case 'Timeout de extrator encerra processo de teste e mantem diagnostico' {
+        $prefixo=Join-Path $pastaTeste 'extrator-timeout'
+        $plano=[pscustomobject]@{Executavel=(Join-Path $PSHOME 'powershell.exe');LinhaComando='-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 20"'}
+        Assert-Throws {Invoke-DellExtractionProcess $plano $pastaTeste $prefixo 1}
+        $registro=Get-Content -LiteralPath ($prefixo+'.processo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ($registro.Erro -match 'tempo limite')
+    }
+    Test-Case 'Fallback DUP recebe destino vazio e ignora manifesto residual do 7Zip' {
+        $origProcesso=${function:Invoke-DellExtractionProcess};$origAssinaturaTmp=${function:Assert-DellPackageFile}
+        $script:AutoLogsTeste=Join-Path $pastaTeste 'extrator-logs'
+        function Test-Path {param($LiteralPath,$PathType) if($LiteralPath -eq (Join-Path $env:ProgramFiles '7-Zip\7z.exe')){return $true};Microsoft.PowerShell.Management\Test-Path @PSBoundParameters}
+        function Assert-DellPackageFile {param($Arquivo,$SHA256) return 'SINTETICO'}
+        function Invoke-DellExtractionProcess {
+            param($Plano,$Diretorio,$PrefixoDiagnostico,$LimiteSegundos)
+            $destino=if($Plano.Metodo -eq '7zip'){($Plano.Argumentos | Where-Object {$_ -like '-o*'}).Substring(2)}else{($Plano.Argumentos | Where-Object {$_ -like '/e=*'}).Substring(3)}
+            Assert-Equal 0 @(Get-ChildItem -LiteralPath $destino -Force).Count
+            [IO.File]::WriteAllText((Join-Path $destino 'package.xml'),'<SoftwareComponent/>')
+            if($Plano.Metodo -eq '7zip'){return 2}
+            $log=($Plano.Argumentos | Where-Object {$_ -like '/l=*'}).Substring(3)
+            Assert-True (-not $log.StartsWith($destino+'\',[StringComparison]::OrdinalIgnoreCase))
+            [IO.File]::WriteAllText($log,'Log sintético preservado')
+            return 0
+        }
+        try {
+            $p=Join-Path $pastaTeste 'extrator-fallback';[void][IO.Directory]::CreateDirectory($p)
+            $r=Invoke-DellMetadataExtraction 'sintetico.exe' $p ('A'*64) $script:AutoLogsTeste
+            Assert-Equal (Join-Path $p 'dup') $r
+            Assert-Equal 1 @(Get-DellMetadataFiles $r | Where-Object Name -eq 'package.xml').Count
+            Assert-True (Test-Path -LiteralPath (Join-Path $script:AutoLogsTeste 'dup.log'))
+        }
+        finally {${function:Invoke-DellExtractionProcess}=$origProcesso;${function:Assert-DellPackageFile}=$origAssinaturaTmp;Remove-Item Function:\Test-Path}
+    }
     Test-Case 'INF seleciona Models por fabricante arquitetura SO e build sem ler IDs arbitrarios' {
         $r=@(ConvertFrom-DellInf $autoInf ([version]'10.0.14393') 3)
         Assert-Equal 1 $r.Count
@@ -1464,7 +1531,7 @@ Getting System Inventory ...
     $script:AutoFixtureTeste=$autoFixture
     function Save-DellPackageDownload {param($Arquivo,$Destino) $script:DownloadsAutoTeste++;[IO.File]::WriteAllText($Destino,'pacote fake');return 11}
     function Assert-DellPackageFile {param($Arquivo,$SHA256) if((Get-FileHash $Arquivo -Algorithm SHA256).Hash -ine $SHA256){throw 'Hash divergente no teste.'};return 'ASSINANTE_SINTETICO'}
-    function Invoke-DellMetadataExtraction {param($Pacote,$Pasta,$SHA256) $script:ExtracoesAutoTeste++;if($script:FalharExtracaoAuto){throw 'Falha simulada de extracao'}; Copy-Item (Join-Path $script:AutoFixtureTeste 'package.xml') $Pasta; if(-not $script:SemInfAutoTeste){Copy-Item (Join-Path $script:AutoFixtureTeste 'rede.inf') $Pasta}}
+    function Invoke-DellMetadataExtraction {param($Pacote,$Pasta,$SHA256,$PastaLogs) $script:ExtracoesAutoTeste++;[void][IO.Directory]::CreateDirectory($PastaLogs);[IO.File]::WriteAllText((Join-Path $PastaLogs 'dup.log'),'Log sintetico de extracao');if($script:FalharExtracaoAuto){throw 'Falha simulada de extracao'}; Copy-Item (Join-Path $script:AutoFixtureTeste 'package.xml') $Pasta; if(-not $script:SemInfAutoTeste){Copy-Item (Join-Path $script:AutoFixtureTeste 'rede.inf') $Pasta};return $Pasta}
     # O cache fica em Temp curto para exercitar MAX_PATH do Windows PowerShell 5.1.
     $cacheTeste=Join-Path $env:TEMP ('dac_'+[guid]::NewGuid().ToString('N').Substring(0,8))
     $fileCache=$autoFile.PSObject.Copy();$fileCache.SHA256=([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create()).ComputeHash([Text.Encoding]::UTF8.GetBytes('pacote fake')))).Replace('-','')
@@ -1498,7 +1565,58 @@ Getting System Inventory ...
             $script:FalharExtracaoAuto=$false
             $r=Get-DellCachedPackageMetadata $autoPkg $fileCache $cacheTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3
             Assert-Equal 'Cache' $r.Origem
-            Assert-Equal 0 @(Get-ChildItem (Join-Path $cacheTeste $fileCache.SHA256) -Filter 'extracao_*').Count
+            Assert-Equal 0 @(Get-ChildItem (Join-Path $cacheTeste $fileCache.SHA256) -Filter 'extracao_*' | Where-Object Name -notlike '*.logs').Count
+        }
+        Test-Case 'Download seguido de falha de extracao preserva bytes assinatura e log no relatorio' {
+            $cacheFalha=Join-Path $cacheTeste 'falha'
+            $script:FalharExtracaoAuto=$true
+            try {
+                $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+                $r=Get-DellAutomaticMetadata @($p) @() $cacheFalha $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+                Assert-Equal 11 $r.BytesBaixados
+                $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+                Assert-Equal 'NaoConcluido' $csv[0].Status
+                Assert-Equal '11' $csv[0].BytesBaixados
+                Assert-Equal 'Download' $csv[0].Origem
+                Assert-Equal 'Extração' $csv[0].Etapa
+                Assert-Equal 'ASSINANTE_SINTETICO' $csv[0].Assinante
+                Assert-True (Test-Path -LiteralPath (Join-Path $csv[0].Diagnostico 'dup.log'))
+                Assert-True ((Get-Content -LiteralPath (Join-Path $csv[0].Diagnostico 'dup.log') -Raw -Encoding UTF8) -match 'Log sintetico')
+            }
+            finally {$script:FalharExtracaoAuto=$false}
+        }
+        Test-Case 'Download interrompido mantem bytes parciais mesmo sem metadados' {
+            $downloadAnterior=${function:Save-DellPackageDownload}
+            function Save-DellPackageDownload {param($Arquivo,$Destino,$Estado) $Estado['BytesBaixados']=[int64]7;throw ([Net.WebException]::new('Falha apos receber bytes'))}
+            try {
+                $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache
+                $r=Get-DellAutomaticMetadata @($p) @() (Join-Path $cacheTeste 'parcial') $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1
+                Assert-Equal 7 $r.BytesBaixados
+                $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+                Assert-Equal '7' $csv[0].BytesBaixados
+                Assert-Equal 'Download' $csv[0].Etapa
+            }
+            finally {${function:Save-DellPackageDownload}=$downloadAnterior}
+        }
+        Test-Case 'Fila prioriza componente inconclusivo de outra familia sem regra por fornecedor' {
+            $p=$autoPkg.PSObject.Copy();$p.DriverId='PSUXX';$p.Type='FRMW';$p.DriverName='Pacote de firmware da PSU fabricante ficticio';$p.FileFrmtInfo=$fileCache
+            $rede=$autoPkg.PSObject.Copy();$rede.DriverName='Network driver Ethernet';$rede.FileFrmtInfo=$fileCache
+            $inventario=@([pscustomobject]@{Nome='Power Supply';Tipo='FRMW';ComponentID='555'},[pscustomobject]@{Nome='Network Ethernet';Tipo='DRVR';ComponentID='999'})
+            $v=@([pscustomobject]@{Componente='Power Supply';Categoria='FRMW';TipoDSU='FRMW';ComponentID='555';Status='Inconclusivo'})
+            $r=Get-DellAutomaticMetadata @($rede,$p) $inventario $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1 -Verificacoes $v
+            $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+            Assert-Equal 'PSUXX' $csv[0].DriverId
+            Assert-Equal 'Limite' $csv[1].Status
+            Assert-True ([int]$csv[0].Prioridade -gt 0)
+            Assert-True ($csv[0].MotivoPrioridade -match 'inconclusivo')
+            Assert-Equal 0 $r.Metadados.Count # Ordenação não transforma aproximação textual em referência válida.
+        }
+        Test-Case 'Entre candidatos da mesma prioridade investiga referencia mais recente primeiro' {
+            $novo=$autoPkg.PSObject.Copy();$novo.DriverId='NOVO';$novo.ReleaseDate='02 Oct 2026';$novo.FileFrmtInfo=$fileCache
+            $antigo=$autoPkg.PSObject.Copy();$antigo.DriverId='ANTIGO';$antigo.ReleaseDate='01 Oct 2026';$antigo.FileFrmtInfo=$fileCache
+            [void](Get-DellAutomaticMetadata @($antigo,$novo) @() $cacheTeste $pastaTeste WST14 'Windows Server 2016 Standard' ([version]'10.0.14393') 3 1)
+            $csv=@(Import-Csv (Join-Path $pastaTeste 'pacotes-analise.csv') -Delimiter ';' -Encoding UTF8)
+            Assert-Equal 'NOVO' $csv[0].DriverId
         }
         Test-Case 'Analise automatica gera auditoria de limite e nao baixa indefinidamente' {
             $p=$autoPkg.PSObject.Copy();$p.FileFrmtInfo=$fileCache

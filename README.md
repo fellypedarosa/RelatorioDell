@@ -110,10 +110,10 @@ O cache padrão é **`%ProgramData%\RelatorioDell\CachePacotes`**, criado automa
 
 #### Como o script obtém e usa os metadados
 
-1. **Seleciona candidatos:** mantém BIOS, firmware e drivers com DUP Windows. Ordena por correspondência textual com o inventário e tamanho. Essa ordem só prioriza a investigação; nomes parecidos não autorizam uma pendência.
+1. **Seleciona candidatos:** mantém BIOS, firmware e drivers com DUP Windows. Usa a primeira comparação para investigar antes os componentes **inconclusivos**, por modelo físico ou termos/famílias do componente. Reconhece vocabulário como `Power Supply`/`PSU`/fonte, chipset, SEP/backplane, CPLD, BIOS, iDRAC, controladoras, rede e discos. Não contém uma lista de fabricantes ou pacotes favorecidos. Ignora termos genéricos como `firmware`, e muitas portas iguais não aumentam artificialmente o peso. Dentro da prioridade, considera correspondência, data mais recente e tamanho. Essa ordem só prioriza a investigação; nomes parecidos não autorizam uma pendência.
 2. **Confere a origem:** aceita somente HTTPS de `downloads.dell.com`/`dl.dell.com`, porta padrão e nome exato do arquivo, sem credenciais, query ou fragmento. O alias `dl` é normalizado para `downloads`; redirecionamentos não são seguidos. O HAR passa a preservar URL validada, SHA256 e tamanho, sem copiar cookies ou a navegação completa.
 3. **Valida o arquivo:** exige SHA256 igual à referência e Authenticode `Valid`, com identidade Dell Inc./Dell Technologies Inc. Não desabilita certificados. Link, hash ou assinatura ausentes/inválidos impedem a extração. O cache também é revalidado; um binário adulterado é descartado para novo download.
-4. **Extrai sem instalar:** prefere o 7-Zip já instalado em `Program Files`, sem baixá-lo. Se ele não expuser o manifesto, ou estiver ausente, usa **somente** a extração documentada do DUP: `/s /e=<pasta> /l=<log>`. Essa alternativa inicia o executável Dell validado em modo de extração e exige administrador. Nunca usa `/s` isolado, `/f`, `/r` ou instaladores internos. Consulte as [opções Windows do DUP][dup-cli].
+4. **Extrai sem instalar:** prefere o 7-Zip já instalado em `Program Files`, sem baixá-lo. Se ele não expuser o manifesto, ou estiver ausente, usa **somente** a extração documentada do DUP: `/s /e="<pasta>" /l="<log>"`. As opções ficam sem aspas; os valores dos caminhos são citados. Cada extrator recebe uma pasta vazia exclusiva, e o log fica **fora** dela. A Dell informa que não extrai para uma pasta com conteúdo. A leitura usa somente a tentativa que teve sucesso, sem misturar resíduos do 7-Zip. Essa alternativa inicia o executável Dell validado em modo de extração e exige administrador. Nunca usa `/s` isolado, `/f`, `/r` ou instaladores internos. Consulte as [opções Windows do DUP][dup-cli].
 5. **Lê `package.xml`:** exige `SoftwareComponent`, schema `1.0`, identidade/releaseID, tipo, formato e versão coerentes com a referência. Lê ComponentIDs, tuplas PCI, sistemas e SOs atendidos. XML com DTD, schema desconhecido ou manifesto ambíguo é recusado.
 6. **Descobre a versão do driver:** quando há INF exposto, lê `DriverVer`, `Class`, `Manufacturer` e `Models`. Escolhe arquitetura amd64 e decoração compatível com versão/build e ProductType do Windows. Cruza os IDs do INF com os do manifesto; não usa IDs de seções arbitrárias. Compara o `DriverVer` com o CIM, **não a versão da suíte**. Referências Microsoft: [DriverVer][inf-driverver], [Manufacturer/TargetOSVersion][inf-manufacturer] e [Models][inf-models].
 7. **Compara e registra:** as referências derivadas alimentam a engine por dispositivo. Exige identidade, versão válida, assinatura indicada pelo CIM e cobertura das instâncias; versões distintas geram grupos separados. Provedor Microsoft não bloqueia sozinho a análise. Firmware pode receber comparação numérica automática quando o pacote tem um único ComponentID, hardware/modelo e SO comprovados. Uma referência mais nova interpretada não mantém o firmware confirmado apenas pela referência antiga.
@@ -137,12 +137,15 @@ Limites, bloqueios HTTP e extrações parciais **não significam “sem atualiza
 
 #### Arquivos para auditoria
 
-- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo.
+- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade` e `BytesBaixados`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
 - `pacotes-metadados.json`: ComponentIDs/PCI, versão do pacote, compatibilidade observada e referências dos INFs, com hashes do manifesto e dos INFs.
 - `drivers-referencias.json`: referências incorporadas/automáticas efetivamente usadas.
 - `_Verificacao.csv`: identidade, origem da versão e motivo de cada resultado; `TipoDSU` preserva o tipo original.
+- `pacotes\<DriverId>_<SHA256 inicial>\`: preserva `7zip.processo.json`/`dup.processo.json`, os respectivos `.stdout.txt`/`.stderr.txt` e `dup.log`, conforme os extratores iniciados. O JSON registra executável, argumentos exatos, diretório, PID, início/fim, código decimal/hexadecimal, erro e conclusão da captura. Se o DUP não criar seu log, os registros do processo continuam disponíveis. A saída extensa de ajuda fica no arquivo, sem inundar o console.
 
-As extrações exclusivas são limpas após a leitura, com conferência do caminho. Estruturas recusadas ou arquivos presos podem permanecer para inspeção. Não publique o cache no Git. O inventário e os dados CIM permanecem locais; a Dell recebe solicitações dos arquivos públicos e os dados normais da conexão.
+O contador soma **bytes de conteúdo recebidos**, incluindo downloads parciais e arquivos cuja validação ou extração posterior falhou. Pacotes reutilizados do cache contam zero bytes de download. Ele não mede cabeçalhos ou todo o tráfego da conexão.
+
+As extrações exclusivas são limpas após a leitura, com conferência do caminho. Seus logs ficam em uma pasta local separada no cache (`extracao_<id>.logs`), preservada também em caso de falha, e são copiados para o diagnóstico da execução. Assim, o DUP pode registrar localmente mesmo quando a saída dos relatórios é UNC. Apenas nomes conhecidos e arquivos de até 20 MiB são copiados; se a cópia falhar ou ultrapassar esse limite, a auditoria informa o caminho local preservado. A limpeza do payload não apaga esses logs. Estruturas recusadas ou arquivos presos podem permanecer para inspeção. Não publique o cache no Git. O inventário e os dados CIM permanecem locais; a Dell recebe solicitações dos arquivos públicos e os dados normais da conexão.
 
 ## 2. Como funciona a engine
 
@@ -470,6 +473,8 @@ Para ajustar uma diferença de formato entre versões, revise os arquivos brutos
 | `Compare-DottedVersion` | Comparação de segmentos numéricos. |
 | `Export-SiteAssessment` | CSV principal, aviso de cobertura parcial e CSV de verificação. |
 | `Get-DellAutomaticMetadata` / `Get-DellCachedPackageMetadata` | Candidatos, cache, limites, download, autenticidade e auditoria por pacote. |
+| `Get-DellPackagePriority` | Ordenação por componentes inconclusivos e data; não decide aplicabilidade. |
+| `Get-DellExtractionPlan` / `Invoke-DellExtractionProcess` | Linha de extração, captura simultânea dos pipes, timeout e diagnóstico preservado do processo. |
 | `Get-DellAutomaticPackageMetadata` / `ConvertFrom-DellInf` | Leitura de XML/INF e referências derivadas, sem condição por fabricante/modelo. |
 | `Merge-DellAutomaticFirmwareRows` | Associa referências de firmware e conserva inconclusivos quando não há comparação comprovada. |
 
@@ -525,7 +530,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **151 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **161 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -595,15 +600,25 @@ As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, 
 
 ### Validação da obtenção automática de metadados
 
-A suíte offline tem **151 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
+A suíte offline tem **161 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
 
 Uma validação separada neste ambiente usou cinco DUPs reais obtidos pelos links/hashes do HAR: **49X84, DFF48, 99GP4, K5DP6 e H81H3**. SHA256 e assinatura Dell foram conferidos. O fluxo extraiu e interpretou os manifestos dos três primeiros por 7-Zip. Os dois últimos não expuseram o manifesto nessa via; a tentativa de `/s /e` foi recusada pelo Windows por exigir elevação na sessão do agente. A execução nativa como administrador permanece para validação no servidor de teste; não foi declarada como concluída aqui.
 
 Os drivers 49X84/99GP4 não expuseram INF utilizável na extração: o payload contém instaladores internos. Foram registrados como extração parcial, sem inventar versão de driver a partir da suíte. A referência incorporada 49X84 continua válida no seu escopo. Essa validação comprova a leitura dos manifestos desses arquivos, não eliminação dos cinco inconclusivos nem suporte a todos os formatos de DUP. Consulte [a evidência da validação automática](docs/evidencias/pacotes-automaticos-2026-10-29.json).
 
+### Correções após o teste de 30/10/2026
+
+O teste no servidor concluiu o inventário, mas não obteve metadados automáticos: houve falhas de extração e três recusas HTTP 403. Os arquivos recebidos não continham os logs internos das extrações. A implementação anterior colocava o log dentro do destino, citava as opções inteiras com aspas, descartava os logs junto do payload e somava downloads somente após o sucesso da análise. Esses problemas foram corrigidos; não foi afirmado que explicam todos os códigos de falha observados.
+
+As regressões verificam a linha `/s /e="pasta" /l="log externo"`, destino vazio, fallback sem misturar manifestos, saída de ajuda maior que o buffer do pipe, falha ao iniciar, timeout, logs preservados, bytes após falhas de download/extração e prioridade de inconclusivos. A ordenação foi reaplicada aos dados recebidos, sem executar pacotes: candidatos de fontes e chipset passam ao início da fila. Isso não comprova que cada candidato atenda ao hardware instalado.
+
+Também foi repetida a leitura do 49X84 real no cache: SHA256/assinatura validados, manifesto extraído por 7-Zip e arquivos de diagnóstico preservados, sem iniciar o DUP nativo. Continuou sem INF exposto, como na validação anterior. **A chamada nativa corrigida ainda precisa de uma nova execução como administrador no servidor de teste.**
+
+Para repetir, substitua o `.ps1` e use o mesmo comando. O cache existente pode ser reutilizado. Ao enviar o resultado, inclua a pasta de diagnóstico inteira, especialmente `pacotes-analise.csv` e a subpasta `pacotes`; não é necessário copiar os executáveis do cache.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 151 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 161 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 

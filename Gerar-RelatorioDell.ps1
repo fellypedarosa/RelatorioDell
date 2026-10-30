@@ -1395,7 +1395,7 @@ function Assert-DellPackageFile {
 }
 
 function Save-DellPackageDownload {
-    param($Arquivo, [string]$Destino)
+    param($Arquivo, [string]$Destino, [System.Collections.IDictionary]$Estado)
     $url=Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) ([string]$Arquivo.FileName)
     $esperado=[int64]0
     [void][int64]::TryParse([string](Get-ObjectValue $Arquivo 'FileSize'),[ref]$esperado)
@@ -1413,6 +1413,8 @@ function Save-DellPackageDownload {
         $buffer=New-Object byte[] 65536; $total=[int64]0; $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
         while (($n=$entrada.Read($buffer,0,$buffer.Length)) -gt 0) {
             $total+=$n
+            # Conta bytes recebidos mesmo se validação/extração posterior falhar.
+            if($null -ne $Estado){$Estado['BytesBaixados']=$total}
             if ($total -gt 512MB -or ($esperado -gt 0 -and $total -gt $esperado) -or $relogio.Elapsed.TotalSeconds -gt 120) { throw 'Download excedeu o tamanho esperado, 512 MiB ou 120 segundos.' }
             $saida.Write($buffer,0,$n)
             if($relogio.Elapsed.TotalSeconds -ge $proximoAviso){Write-Log ("Baixando {0}: {1:N1} MiB recebidos." -f $Arquivo.FileName,($total/1MB));$proximoAviso+=15}
@@ -1424,48 +1426,96 @@ function Save-DellPackageDownload {
 }
 
 function Get-DellExtractionPlan {
-    param([string]$Pacote, [string]$Pasta, [string]$SeteZip)
-    if($SeteZip){return [pscustomobject]@{Executavel=$SeteZip;Argumentos=@('x','-y','-bso0','-bsp0','-bse0',('-o'+$Pasta),$Pacote)}}
+    param([string]$Pacote, [string]$Pasta, [string]$SeteZip, [string]$ArquivoLog)
+    if($SeteZip){
+        $argsZip=@('x','-y','-bso0','-bsp0','-bse0',('-o'+$Pasta),$Pacote)
+        return [pscustomobject]@{Executavel=$SeteZip;Argumentos=$argsZip;LinhaComando=(@($argsZip | ForEach-Object {ConvertTo-NativeArgument $_}) -join ' ');Metodo='7zip'}
+    }
+    if(-not $ArquivoLog){$ArquivoLog=$Pasta+'.extracao.log'}
+    $destino=[IO.Path]::GetFullPath($Pasta).TrimEnd('\')
+    $log=[IO.Path]::GetFullPath($ArquivoLog)
+    if($log -eq $destino -or $log.StartsWith($destino+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'O log do DUP deve ficar fora da pasta de extração, que precisa estar vazia.'}
     # /s NUNCA é usado isoladamente: /e é obrigatório e só extrai o DUP.
-    [pscustomobject]@{Executavel=$Pacote;Argumentos=@('/s',('/e='+$Pasta),('/l='+(Join-Path $Pasta 'extracao.log')))}
+    # Alguns frameworks interpretam a linha bruta: aspas somente nos VALORES,
+    # conforme /s /e="pasta" /l="arquivo" da documentação Dell.
+    [pscustomobject]@{Executavel=$Pacote;Argumentos=@('/s',('/e='+$Pasta),('/l='+$log));Metodo='dup'
+        LinhaComando=('/s /e='+(ConvertTo-NativeArgument $Pasta)+' /l='+(ConvertTo-NativeArgument $log))}
+}
+
+function Invoke-DellExtractionProcess {
+    param($Plano, [string]$Diretorio, [string]$PrefixoDiagnostico, [int]$LimiteSegundos=180)
+    $inicio=New-Object Diagnostics.ProcessStartInfo
+    $inicio.FileName=$Plano.Executavel; $inicio.Arguments=$Plano.LinhaComando
+    $inicio.UseShellExecute=$false; $inicio.CreateNoWindow=$true
+    $inicio.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+    $inicio.WorkingDirectory=$Diretorio
+    $inicio.RedirectStandardInput=$true; $inicio.RedirectStandardOutput=$true; $inicio.RedirectStandardError=$true
+    $processo=New-Object Diagnostics.Process; $processo.StartInfo=$inicio
+    $saidaTask=$null; $erroTask=$null; $iniciado=$false; $codigo=$null
+    $registro=[ordered]@{Executavel=$inicio.FileName;Argumentos=$inicio.Arguments;Diretorio=$Diretorio;Inicio=(Get-Date).ToString('o');PID=$null;CodigoSaida=$null;CodigoHex='';Erro='';CapturaCompleta=$false}
+    $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
+    try {
+        [void]$processo.Start();$iniciado=$true;$registro.PID=$processo.Id
+        $processo.StandardInput.Close()
+        # Pipes lidos em paralelo: ajuda extensa de um DUP não bloqueia o processo.
+        $saidaTask=$processo.StandardOutput.ReadToEndAsync();$erroTask=$processo.StandardError.ReadToEndAsync()
+        while(-not $processo.WaitForExit(1000)) {
+            if($relogio.Elapsed.TotalSeconds -ge $LimiteSegundos){$processo.Kill();[void]$processo.WaitForExit(5000);throw 'Extração excedeu o tempo limite. Verifique auxiliares do extrator.'}
+            if($relogio.Elapsed.TotalSeconds -ge $proximoAviso){Write-Log 'Extração de metadados continua em execução; nenhuma atualização está sendo aplicada.';$proximoAviso+=15}
+        }
+        $codigo=$processo.ExitCode
+        return $codigo
+    }
+    catch {$registro.Erro=$_.Exception.Message;throw}
+    finally {
+        try {
+            if($iniciado -and $processo.HasExited){
+                $registro.CodigoSaida=$processo.ExitCode
+                $registro.CodigoHex='0x'+[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$processo.ExitCode),0).ToString('X8')
+            }
+            $tarefas=@($saidaTask,$erroTask | Where-Object {$null -ne $_})
+            if($tarefas.Count){$registro.CapturaCompleta=[Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$tarefas,5000)}
+            foreach($par in @(@($saidaTask,'stdout'),@($erroTask,'stderr'))) {
+                $texto='Captura não concluída: processo auxiliar pode manter o pipe aberto.'
+                if($null -ne $par[0] -and $par[0].Status -eq [Threading.Tasks.TaskStatus]::RanToCompletion){$texto=$par[0].GetAwaiter().GetResult()}
+                [IO.File]::WriteAllText(($PrefixoDiagnostico+'.'+$par[1]+'.txt'),$texto,(New-Object Text.UTF8Encoding($true)))
+            }
+            $registro.Fim=(Get-Date).ToString('o')
+            [IO.File]::WriteAllText(($PrefixoDiagnostico+'.processo.json'),(ConvertTo-Json $registro -Depth 4),(New-Object Text.UTF8Encoding($true)))
+        }
+        finally {$processo.Dispose()}
+    }
 }
 
 function Invoke-DellMetadataExtraction {
-    param([string]$Pacote, [string]$Pasta, [string]$SHA256)
+    param([string]$Pacote, [string]$Pasta, [string]$SHA256, [string]$PastaLogs)
     [void](Assert-DellPackageFile $Pacote $SHA256)
+    if(-not $PastaLogs){$PastaLogs=$Pasta+'.logs'}
+    [void][IO.Directory]::CreateDirectory($PastaLogs)
+    # O destino de cada extrator é separado dos logs e de tentativas anteriores.
     $seteZip=Join-Path $env:ProgramFiles '7-Zip\7z.exe'
-    if(-not (Test-Path -LiteralPath $seteZip -PathType Leaf)){$seteZip=''}
-    $plano=Get-DellExtractionPlan $Pacote $Pasta $seteZip
-    $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
+    if(-not (Test-Path -LiteralPath $seteZip -PathType Leaf)){$seteZip='';Write-Log '7-Zip não localizado; usando extração nativa do DUP Dell validado.'}
+    $relogio=[Diagnostics.Stopwatch]::StartNew()
     for($tentativa=0;$tentativa -lt 2;$tentativa++) {
-        $inicio=New-Object Diagnostics.ProcessStartInfo
-        $inicio.FileName=$plano.Executavel
-        $inicio.Arguments=(@($plano.Argumentos | ForEach-Object {ConvertTo-NativeArgument $_}) -join ' ')
-        $inicio.UseShellExecute=$false; $inicio.CreateNoWindow=$true
-        $inicio.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-        $inicio.WorkingDirectory=$Pasta
-        $processo=New-Object Diagnostics.Process
-        $processo.StartInfo=$inicio
-        try {
-            [void]$processo.Start()
-            while(-not $processo.WaitForExit(1000)) {
-                if($relogio.Elapsed.TotalSeconds -ge 180){$processo.Kill();throw 'Extração excedeu 3 minutos. Verifique auxiliares do extrator.'}
-                if($relogio.Elapsed.TotalSeconds -ge $proximoAviso){Write-Log 'Extração de metadados continua em execução; nenhuma atualização está sendo aplicada.';$proximoAviso+=15}
-            }
-            $codigo=$processo.ExitCode
-        }
-        finally { $processo.Dispose() }
+        $zipAtual=if($tentativa -eq 0){$seteZip}else{''}
+        $nome=if($zipAtual){'7zip'}else{'dup'}
+        $destino=Join-Path $Pasta $nome
+        [void][IO.Directory]::CreateDirectory($destino)
+        if(@(Get-ChildItem -LiteralPath $destino -Force).Count){throw 'Destino do extrator não está vazio; não será reutilizado.'}
+        $plano=Get-DellExtractionPlan $Pacote $destino $zipAtual (Join-Path $PastaLogs 'dup.log')
+        $restante=180-[int][Math]::Ceiling($relogio.Elapsed.TotalSeconds)
+        if($restante -le 0){throw 'Extração excedeu 3 minutos.'}
+        $codigo=Invoke-DellExtractionProcess $plano $Pasta (Join-Path $PastaLogs $nome) $restante
         if($seteZip -and $tentativa -eq 0) {
-            $manifestos=@(Get-DellMetadataFiles $Pasta | Where-Object Name -ieq 'package.xml')
+            $manifestos=@(Get-DellMetadataFiles $destino | Where-Object Name -ieq 'package.xml')
             if($codigo -ne 0 -or $manifestos.Count -eq 0) {
                 Write-Log 'Arquivo não exposto pelo 7-Zip; usando somente extração /s /e do DUP Dell validado.'
-                $nativa=Join-Path $Pasta 'dup';[void][IO.Directory]::CreateDirectory($nativa)
-                $plano=Get-DellExtractionPlan $Pacote $nativa
                 continue
             }
         }
         if($codigo -ne 0){throw "Extração do DUP falhou (código $codigo)."}
-        return
+        # Lê somente o destino que teve sucesso; resíduos do 7-Zip não duplicam manifesto.
+        return $destino
     }
 }
 
@@ -1682,7 +1732,9 @@ function Get-DellAutomaticPackageMetadata {
 }
 
 function Get-DellCachedPackageMetadata {
-    param($Pacote, $Arquivo, [string]$Cache, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3)
+    param($Pacote, $Arquivo, [string]$Cache, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3,
+        [string]$PastaDiagnostico, [System.Collections.IDictionary]$Estado)
+    if($null -eq $Estado){$Estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}}
     if(([string](Get-ObjectValue $Arquivo 'SHA256')) -notmatch '^[A-Fa-f0-9]{64}$'){throw 'SHA256 não informado pela referência Dell; pacote não será executado.'}
     if($Arquivo.FileType -ne 'LW64'){throw 'Análise automática aceita DUP Windows x64 (LW64).'}
     [void](Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) ([string]$Arquivo.FileName))
@@ -1696,8 +1748,10 @@ function Get-DellCachedPackageMetadata {
     if(((Get-Item -LiteralPath $dir).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Entrada de cache não pode ser reparse point.'}
     $lock=[IO.File]::Open((Join-Path $dir 'pacote.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     $extraido=Join-Path $dir ('extracao_'+[guid]::NewGuid().ToString('N'))
+    $logs=$extraido+'.logs'
     $exe=Join-Path $dir 'pacote.exe'; $novo=$null; $guard=$null; $origem='Cache'; $bytes=[int64]0
     try {
+        $Estado['Origem']='Cache'
         if(Test-Path -LiteralPath $exe -PathType Leaf) {
             if(((Get-Item -LiteralPath $exe).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Executável do cache não pode ser reparse point.'}
             try {[void](Assert-DellPackageFile $exe $Arquivo.SHA256)}
@@ -1705,7 +1759,10 @@ function Get-DellCachedPackageMetadata {
         }
         if(-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
             $novo=Join-Path $dir ([guid]::NewGuid().ToString('N')+'.download')
-            $bytes=Save-DellPackageDownload $Arquivo $novo
+            $Estado['Etapa']='Download';$Estado['Origem']='Download'
+            $bytes=Save-DellPackageDownload $Arquivo $novo -Estado $Estado
+            $Estado['BytesBaixados']=$bytes
+            $Estado['Etapa']='Validação'
             [void](Assert-DellPackageFile $novo $Arquivo.SHA256)
             Move-Item -LiteralPath $novo -Destination $exe
             $origem='Download'
@@ -1713,18 +1770,39 @@ function Get-DellCachedPackageMetadata {
         # Mantém o executável bloqueado contra escrita/renomeação durante validação e extração.
         $guard=[IO.File]::Open($exe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
         $assinante=Assert-DellPackageFile $exe $Arquivo.SHA256
+        $Estado['Assinante']=$assinante
         [void][IO.Directory]::CreateDirectory($extraido)
-        Invoke-DellMetadataExtraction $exe $extraido $Arquivo.SHA256
-        $meta=Get-DellAutomaticPackageMetadata $extraido $Pacote $Arquivo $SO $LegendaSO $WindowsVersao $ProductType
+        $Estado['Etapa']='Extração';$Estado['Diagnostico']=$logs
+        $conteudo=Invoke-DellMetadataExtraction $exe $extraido $Arquivo.SHA256 -PastaLogs $logs
+        $Estado['Etapa']='Metadados'
+        $meta=Get-DellAutomaticPackageMetadata $conteudo $Pacote $Arquivo $SO $LegendaSO $WindowsVersao $ProductType
         [pscustomobject]@{Metadados=$meta;Origem=$origem;BytesBaixados=$bytes;SHA256=[string]$Arquivo.SHA256;Assinante=$assinante}
     }
     finally {
-        if($guard){$guard.Dispose()}
-        if($novo -and (Test-Path -LiteralPath $novo)){Remove-Item -LiteralPath $novo -Force}
-        # Remove apenas a extração exclusiva recém-criada, após conferir contenção.
-        $alvo=[IO.Path]::GetFullPath($extraido)
-        $limite=[IO.Path]::GetFullPath($dir).TrimEnd('\')+'\'
         try {
+            if($guard){$guard.Dispose()}
+            if($novo -and (Test-Path -LiteralPath $novo)){Remove-Item -LiteralPath $novo -Force}
+            # Preserva somente arquivos conhecidos de diagnóstico, nunca o payload.
+            # O DUP escreve localmente; relatórios em UNC recebem cópias após encerrar.
+            if($PastaDiagnostico -and (Test-Path -LiteralPath $logs -PathType Container)) {
+                try {
+                    [void][IO.Directory]::CreateDirectory($PastaDiagnostico)
+                    $copiados=$true
+                    foreach($nome in @('7zip.stdout.txt','7zip.stderr.txt','7zip.processo.json','dup.stdout.txt','dup.stderr.txt','dup.processo.json','dup.log')) {
+                        $arquivoLog=Join-Path $logs $nome
+                        if(-not (Test-Path -LiteralPath $arquivoLog -PathType Leaf)){continue}
+                        $itemLog=Get-Item -LiteralPath $arquivoLog
+                        if(($itemLog.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $itemLog.Length -gt 20MB){$copiados=$false;continue}
+                        Copy-Item -LiteralPath $arquivoLog -Destination (Join-Path $PastaDiagnostico $nome) -Force
+                    }
+                    if($copiados){$Estado['Diagnostico']=$PastaDiagnostico}
+                    else{Write-Log "Parte dos logs foi mantida no cache: $logs." 'AVISO'}
+                }
+                catch {Write-Log "Não foi possível copiar todos os logs; preservados em $logs. $($_.Exception.Message)" 'AVISO'}
+            }
+            # Remove apenas a extração exclusiva recém-criada, após conferir contenção.
+            $alvo=[IO.Path]::GetFullPath($extraido)
+            $limite=[IO.Path]::GetFullPath($dir).TrimEnd('\')+'\'
             if($alvo.StartsWith($limite,[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $alvo) -match '^extracao_[0-9a-f]{32}$' -and (Test-Path -LiteralPath $alvo)) {
                 $seguro=$true
                 try {[void]@(Get-DellMetadataFiles $alvo)}catch{$seguro=$false;Write-Log 'Extração com estrutura/limites recusados: limpeza recursiva não foi executada.' 'AVISO'}
@@ -1735,35 +1813,75 @@ function Get-DellCachedPackageMetadata {
     }
 }
 
+function Get-DellPackagePriority {
+    param($Pacote, [object[]]$Inventario, [object[]]$Verificacoes)
+    $titulo=[string]$Pacote.DriverName
+    $inconclusivos=@($Verificacoes | Where-Object Status -eq 'Inconclusivo')
+    $prioridade=0; $score=0; $motivo='Ordem geral do inventário.'
+    # Vocabulário de famílias serve apenas para ordenar a investigação. Não
+    # comprova aplicabilidade e não contém fabricante, pacote ou modelo fixo.
+    $familias=@(
+        '(?i)power\s*supply|\bPSU\b|fonte(?:s)?(?:\s+de\s+alimenta[cç][aã]o)?',
+        '(?i)chipset|\bINF\b', '(?i)\bCPLD\b',
+        '(?i)\bSEP\b|backplane|expander|enclosure|gabinete',
+        '(?i)\bBIOS\b', '(?i)\biDRAC\b|remote\s+access',
+        '(?i)\bPERC\b|RAID|controladora',
+        '(?i)ethernet|network|\bNIC\b|rede|NetXtreme|ConnectX',
+        '(?i)\bdisk\b|\bdrive\b|\bdisco\b|\bSSD\b|\bHDD\b'
+    )
+    foreach($i in $Inventario) {
+        $nome=[string]$i.Nome; $cid=[string](Get-ObjectValue $i 'ComponentID')
+        $pendente=@($inconclusivos | Where-Object {
+            ([string](Get-ObjectValue $_ 'TipoDSU') -eq [string]$i.Tipo -or [string]$_.Categoria -eq [string]$i.Tipo) -and
+            (($cid -and $cid -eq [string](Get-ObjectValue $_ 'ComponentID')) -or [string]$_.Componente -eq $nome)
+        }).Count -gt 0
+        $modelo=[string](Get-ObjectValue $i 'ModeloDispositivo')
+        $pontos=0
+        if($modelo.Length -ge 5 -and $titulo.IndexOf($modelo,[StringComparison]::OrdinalIgnoreCase) -ge 0){$pontos+=100}
+        $genericos=@('firmware','driver','drivers','controller','controladora','device','system','power','supply','bayid','version','update','mini','integrated')
+        foreach($token in @($nome -split '[^A-Za-z0-9]+' | Where-Object {$_.Length -ge 5 -and $_ -notin $genericos} | Select-Object -Unique)) {
+            if($titulo -match ('(?i)(?<![A-Za-z0-9])'+[regex]::Escape($token)+'(?![A-Za-z0-9])')){$pontos++}
+        }
+        $score=[Math]::Max($score,$pontos) # Muitas portas iguais não dominam a fila.
+        if(-not $pendente -or [string]$i.Tipo -ne [string]$Pacote.Type){continue}
+        $aproximado=$false
+        foreach($familia in $familias){if($nome -match $familia -and $titulo -match $familia){$aproximado=$true;break}}
+        $nivel=if($pontos -ge 100){3}elseif($pontos -gt 0 -or $aproximado){2}else{0}
+        if($nivel -gt $prioridade){$prioridade=$nivel;$motivo="Investigar componente inconclusivo: $nome. Correspondência textual/família; não comprova aplicabilidade."}
+    }
+    [pscustomobject]@{Prioridade=$prioridade;Score=$score;Motivo=$motivo}
+}
+
 function Get-DellAutomaticMetadata {
-    param([object[]]$Downloads, [object[]]$Inventario, [string]$Cache, [string]$Pasta, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3, [int]$Limite=30)
+    param([object[]]$Downloads, [object[]]$Inventario, [string]$Cache, [string]$Pasta, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3, [int]$Limite=30, [object[]]$Verificacoes=@())
     $candidatos=@(@(foreach($p in $Downloads) {
         if($p.Type -notin @('BIOS','FRMW','DRVR')){continue}
         $f=Get-SiteWindowsPackage $p
         if($null -eq $f){continue}
-        $score=0
-        foreach($i in $Inventario) {
-            $modelo=[string](Get-ObjectValue $i 'ModeloDispositivo')
-            if($modelo.Length -ge 5 -and $p.DriverName.IndexOf($modelo,[StringComparison]::OrdinalIgnoreCase) -ge 0){$score+=100}
-            foreach($token in @($i.Nome -split '[^A-Za-z0-9]+' | Where-Object {$_.Length -ge 5} | Select-Object -Unique)) {
-                if($p.DriverName.IndexOf($token,[StringComparison]::OrdinalIgnoreCase) -ge 0){$score+=1}
-            }
-        }
-        [pscustomobject]@{Pacote=$p;Arquivo=$f;Score=$score;Tamanho=([int64](Get-ObjectValue $f 'FileSize'))}
-    }) | Sort-Object @{Expression='Score';Descending=$true},Tamanho)
+        $ordem=Get-DellPackagePriority $p $Inventario $Verificacoes
+        [pscustomobject]@{Pacote=$p;Arquivo=$f;Prioridade=$ordem.Prioridade;Score=$ordem.Score;Motivo=$ordem.Motivo;Data=(Get-SiteReleaseDate $p);Tamanho=([int64](Get-ObjectValue $f 'FileSize'))}
+    }) | Sort-Object @{Expression='Prioridade';Descending=$true},@{Expression='Score';Descending=$true},@{Expression='Data';Descending=$true},Tamanho)
     $auditoria=New-Object 'System.Collections.Generic.List[object]'
     $metadados=New-Object 'System.Collections.Generic.List[object]'
     $bytes=[int64]0; $reservado=[int64]0; $executados=0; $parcial=$false; $falhasRede=0
     foreach($c in $candidatos) {
-        $registro=[pscustomobject]@{DriverId=[string]$c.Pacote.DriverId;Pacote=[string]$c.Arquivo.FileName;Status='';Detalhe='';SHA256=[string](Get-ObjectValue $c.Arquivo 'SHA256');Origem='';Assinante=''}
+        $registro=[pscustomobject]@{DriverId=[string]$c.Pacote.DriverId;Pacote=[string]$c.Arquivo.FileName;Status='';Detalhe='';SHA256=[string](Get-ObjectValue $c.Arquivo 'SHA256');Origem='';Assinante='';BytesBaixados=[int64]0;Etapa='';Diagnostico='';Prioridade=$c.Prioridade;MotivoPrioridade=$c.Motivo}
+        $estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}
         try {
             $reserva=if($c.Tamanho -gt 0){$c.Tamanho}else{512MB}
-            if($executados -ge $Limite -or $reservado+$reserva -gt 2GB -or $falhasRede -ge 3){$registro.Status='Limite';$registro.Detalhe='Limite de pacotes, reserva de 2 GiB ou três falhas consecutivas de rede.';$parcial=$true;continue}
+            $bloqueio=if($falhasRede -ge 3){'Análise interrompida após três falhas consecutivas de rede.'}elseif($executados -ge $Limite){'Limite de pacotes por execução.'}elseif($reservado+$reserva -gt 2GB){'Reserva de 2 GiB atingida.'}else{''}
+            if($bloqueio){$registro.Status='Limite';$registro.Detalhe=$bloqueio;$parcial=$true;continue}
             $reservado+=$reserva
             $executados++
             Write-Log "Metadados Dell ($executados/$Limite): $($c.Pacote.DriverId) / $($c.Arquivo.FileName)."
-            $resultado=Get-DellCachedPackageMetadata $c.Pacote $c.Arquivo $Cache $SO $LegendaSO $WindowsVersao $ProductType
-            $bytes+=$resultado.BytesBaixados
+            $destDiag=''
+            if($Pasta -and [string](Get-ObjectValue $c.Arquivo 'SHA256') -match '^[A-Fa-f0-9]{64}$') {
+                $idSeguro=([string]$c.Pacote.DriverId -replace '[^A-Za-z0-9_-]','_')
+                if($idSeguro.Length -gt 20){$idSeguro=$idSeguro.Substring(0,20)}
+                $destDiag=Join-Path (Join-Path $Pasta 'pacotes') ($idSeguro+'_'+$c.Arquivo.SHA256.Substring(0,12))
+            }
+            $resultado=Get-DellCachedPackageMetadata $c.Pacote $c.Arquivo $Cache $SO $LegendaSO $WindowsVersao $ProductType -PastaDiagnostico $destDiag -Estado $estado
+            if($estado.BytesBaixados -eq 0){$estado.BytesBaixados=$resultado.BytesBaixados}
             $falhasRede=0
             $metadados.Add($resultado.Metadados)
             $registro.Status='Extraido';$registro.Origem=$resultado.Origem
@@ -1778,7 +1896,13 @@ function Get-DellAutomaticMetadata {
             if($erroRede){$falhasRede++}else{$falhasRede=0}
             Write-Log "Pacote $($registro.DriverId): $($registro.Detalhe)" 'AVISO'
         }
-        finally {$auditoria.Add($registro)}
+        finally {
+            $registro.BytesBaixados=[int64]$estado.BytesBaixados;$bytes+=$registro.BytesBaixados
+            $registro.Etapa=$estado.Etapa;$registro.Diagnostico=$estado.Diagnostico
+            if($estado.Origem){$registro.Origem=$estado.Origem}
+            if($estado.Assinante){$registro.Assinante=$estado.Assinante}
+            $auditoria.Add($registro)
+        }
     }
     if($Pasta) {
         [IO.File]::WriteAllText((Join-Path $Pasta 'pacotes-metadados.json'),(ConvertTo-Json -InputObject ($metadados.ToArray()) -Depth 15),(New-Object Text.UTF8Encoding($true)))
@@ -1909,7 +2033,7 @@ try {
         $driversWindows = @()
         try {
             $driversWindows = @(Get-DellWindowsNetworkDrivers)
-            Write-Log "Drivers de interfaces PCI de rede coletados: $($driversWindows.Count). A comparação exige metadados de pacote Dell; sem Windows Update."
+            Write-Log "Drivers de dispositivos PCI coletados: $($driversWindows.Count). A comparação exige metadados de pacote Dell; sem Windows Update."
         }
         catch { Write-Log "Não foi possível obter drivers de rede pelo CIM: $($_.Exception.Message). Os casos sem evidência permanecem inconclusivos." 'AVISO' }
         [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'drivers-windows.json'), (ConvertTo-Json -InputObject @($driversWindows) -Depth 5), (New-Object Text.UTF8Encoding($true)))
@@ -1921,7 +2045,7 @@ try {
             if(-not $CaminhoCachePacotes){$CaminhoCachePacotes=Join-Path $env:ProgramData 'RelatorioDell\CachePacotes'}
             $CaminhoCachePacotes=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CaminhoCachePacotes)
             Write-Log "Análise automática de DUPs: cache=$CaminhoCachePacotes; máximo=$LimitePacotes pacotes. Não aplica atualizações."
-            $auto=Get-DellAutomaticMetadata -Downloads $dadosSite.DriverListData -Inventario $inventario -Cache $CaminhoCachePacotes -Pasta $script:Diagnostico -SO $so -LegendaSO ([string]$sistemaOperacional.Caption) -WindowsVersao ([version]$sistemaOperacional.Version) -ProductType $sistemaOperacional.ProductType -Limite $LimitePacotes
+            $auto=Get-DellAutomaticMetadata -Downloads $dadosSite.DriverListData -Inventario $inventario -Cache $CaminhoCachePacotes -Pasta $script:Diagnostico -SO $so -LegendaSO ([string]$sistemaOperacional.Caption) -WindowsVersao ([version]$sistemaOperacional.Version) -ProductType $sistemaOperacional.ProductType -Limite $LimitePacotes -Verificacoes $verificacoes
             $novas=@(foreach($meta in $auto.Metadados){foreach($def in $meta.DefinicoesDrivers){$def}})
             if($novas.Count) {
                 # INF do próprio pacote substitui a referência incorporada daquela versão.
