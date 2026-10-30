@@ -1,0 +1,28 @@
+{
+    "ProductCode":  "poweredge-r530",
+    "DriverListData":  [
+                           {
+                               "DriverId":  "49X84",
+                               "DriverName":  "Atualização de driver do Windows de 64 bits (Broadcom) para adaptadores Ethernet NetXtreme, 21.8",
+                               "Type":  "DRVR",
+                               "DellVer":  "21.80.3, 218.0.169.2",
+                               "Imp":  "Opcional ",
+                               "ReleaseDate":  "12 Apr 2021",
+                               "CatName":  "Rede",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "Release_user_NX1_v218.0.169.2.txt",
+                                                        "FileType":  "FET"
+                                                    },
+                                                    {
+                                                        "FileName":  "nx1_windows_version.txt",
+                                                        "FileType":  "RC"
+                                                    }
+                                                ]
+                           }
+                       ]
+}

@@ -1,0 +1,55 @@
+{
+    "ProductCode":  "poweredge-r530",
+    "DriverListData":  [
+                           {
+                               "DriverId":  "RG9MK",
+                               "DriverName":  "Toshiba EG03 para os números de modelo MG04SCA20ENY e MG04SCA40ENY.",
+                               "Type":  "FRMW",
+                               "DellVer":  "EG03, A00",
+                               "Imp":  "Recomendada",
+                               "ReleaseDate":  "10 Aug 2020",
+                               "CatName":  "Unidade SAS",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "SAS-Drive_Firmware_RG9MK_WN64_EG03_A00_03.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "SAS-Drive_Firmware_RG9MK_LN64_EG03_A00_03.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "SAS-Drive_Firmware_RG9MK_WN32_EG03_A00.EXE",
+                                                        "FileType":  "LWXP"
+                                                    },
+                                                    {
+                                                        "FileName":  "SAS-Drive_Firmware_RG9MK_LN64_EG03_A00_03.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ]
+                           },
+                           {
+                               "DriverId":  "P183W",
+                               "DriverName":  "Seagate CimarronBP SATA de LA0C FW para números do modelo ST8000NM023B",
+                               "Type":  "FRMW",
+                               "DellVer":  "LA0C, A00",
+                               "Imp":  "Recomendada",
+                               "ReleaseDate":  "03 Mar 2025",
+                               "CatName":  "Storage",
+                               "FileFrmtInfo":  {
+                                                    "FileName":  "Serial-ATA_Firmware_P183W_WN64_LA0C_A00_01.EXE",
+                                                    "FileType":  "LW64"
+                                                },
+                               "OthFileFrmts":  [
+                                                    {
+                                                        "FileName":  "Serial-ATA_Firmware_P183W_LN64_LA0C_A00_01.BIN.sign",
+                                                        "FileType":  "SIGE"
+                                                    },
+                                                    {
+                                                        "FileName":  "Serial-ATA_Firmware_P183W_LN64_LA0C_A00_01.BIN",
+                                                        "FileType":  "LLXP"
+                                                    }
+                                                ]
+                           }
+                       ]
+}

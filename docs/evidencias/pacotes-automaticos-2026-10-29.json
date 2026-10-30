@@ -1,0 +1,69 @@
+{
+    "Data":  "2026-10-29",
+    "Metodo":  "URLs e SHA256 do HAR real normalizado. Download/cache local. Authenticode Dell valido antes de extrair. 7-Zip estatico; fallback nativo /s /e documentado, nunca /s isolado ou aplicacao de atualizacao.",
+    "Amostra":  [
+                    {
+                        "DriverId":  "49X84",
+                        "SHA256":  "6B767E913579FD28E9947514EB75C0EDF53EA11989DFE833EB3ED08722C92218",
+                        "Authenticode":  "Valid",
+                        "Assinante":  "CN=Dell Inc., O=Dell Inc., L=Round Rock, S=Texas, C=US",
+                        "Thumbprint":  "41F396C4921F1033EE3279DDABD7306A0B3C6124",
+                        "ManifestoInterpretado":  true,
+                        "SHA256Xml":  "94440384A7EBAF00DD7351F7D6FB69BD3252ECB5C1E986FBE4A0302D9B5D149C",
+                        "ReferenciasINF":  0,
+                        "Observacao":  "Não foi encontrado INF exposto e compatível; payloads encapsulados não são executados nem adivinhados."
+                    },
+                    {
+                        "DriverId":  "H81H3",
+                        "SHA256":  "EC5E35B0FA498DA024F8A5409A441E414A6BE6BAF76256FD298764E9326F2BAB",
+                        "Authenticode":  "Valid",
+                        "Assinante":  "CN=Dell Inc., OU=Product Group Release Engineering, O=Dell Inc., L=Round Rock, S=Texas, C=US",
+                        "Thumbprint":  "B13B89BABC4F77D681ADEFB714EE6090146079D1",
+                        "ManifestoInterpretado":  false,
+                        "SHA256Xml":  "",
+                        "ReferenciasINF":  0,
+                        "Observacao":  "7-Zip nao expos manifesto; extracao /s /e recusada pelo Windows por falta de elevacao da sessao do agente. Nenhum DUP foi iniciado nessa tentativa."
+                    },
+                    {
+                        "DriverId":  "K5DP6",
+                        "SHA256":  "01119C45A65A230B316C82C4D65D53E6366AD3720DB5FC8FC12D401CE6E47ED8",
+                        "Authenticode":  "Valid",
+                        "Assinante":  "CN=Dell Inc., OU=Product Group Release Engineering, O=Dell Inc., L=Round Rock, S=Texas, C=US",
+                        "Thumbprint":  "B13B89BABC4F77D681ADEFB714EE6090146079D1",
+                        "ManifestoInterpretado":  false,
+                        "SHA256Xml":  "",
+                        "ReferenciasINF":  0,
+                        "Observacao":  "7-Zip nao expos manifesto; extracao /s /e recusada pelo Windows por falta de elevacao da sessao do agente. Nenhum DUP foi iniciado nessa tentativa."
+                    },
+                    {
+                        "DriverId":  "99GP4",
+                        "SHA256":  "62B4A1C4A2F972B5F61777977FAE83CF4069DF981B1DBE53646246F4867F0E1F",
+                        "Authenticode":  "Valid",
+                        "Assinante":  "CN=Dell Inc., O=Dell Inc., L=Round Rock, S=Texas, C=US",
+                        "Thumbprint":  "41F396C4921F1033EE3279DDABD7306A0B3C6124",
+                        "ManifestoInterpretado":  true,
+                        "SHA256Xml":  "2872260109488CA9BADE136EC3730992FF34500E3D666180E50556313A3AFB98",
+                        "ReferenciasINF":  0,
+                        "Observacao":  "Não foi encontrado INF exposto e compatível; payloads encapsulados não são executados nem adivinhados."
+                    },
+                    {
+                        "DriverId":  "DFF48",
+                        "SHA256":  "AC496387763C479622CDC9537B78F07F27ABB51CCC1B9000D5FE5D1C99098334",
+                        "Authenticode":  "Valid",
+                        "Assinante":  "CN=Dell Technologies Inc., OU=DUP Creation Service, O=Dell Technologies Inc., L=Round Rock, S=Texas, C=US",
+                        "Thumbprint":  "297940D73879665FEEDD6E0B2F018FC3E83841AD",
+                        "ManifestoInterpretado":  true,
+                        "SHA256Xml":  "F54FEBB0536E816DE9BD7ABA444D7F80437C62A9A52A6B07194F7179CC29F3E0",
+                        "ReferenciasINF":  0,
+                        "Observacao":  "Metadados extraídos; aplicabilidade ainda depende de identidade e versões equivalentes."
+                    }
+                ],
+    "Limites":  "Tres manifestos interpretados. Dois pacotes dependem de validacao da extracao nativa em PowerShell administrador no servidor de teste. Drivers 49X84/99GP4 nao expuseram INF e nao geraram nova regra automatica. Teste positivo generico XML+INF usa fixture sintetico separado.",
+    "NenhumaAtualizacaoInstalada":  true,
+    "Fontes":  [
+                   "https://www.dell.com/support/manuals/en-ca/dell-update-packages-v17.10.00/dup_17.10_users_guide/windows-cli-options?guid=guid-7e40f460-fdff-4cf9-b26f-e58065d8acbe\u0026lang=en-us",
+                   "https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-driverver-directive",
+                   "https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-manufacturer-section",
+                   "https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-models-section"
+               ]
+}

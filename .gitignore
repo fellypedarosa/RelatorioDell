@@ -10,3 +10,7 @@
 # Cópias transitórias e diretórios exclusivos dos testes.
 /backup_antes_API_*/
 /tests/temporario_*/
+/.tmp/
+/InventarioDell*.xml
+/CacheDell/
+/CachePacotes/

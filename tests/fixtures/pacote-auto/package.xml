@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<SoftwareComponent schemaVersion="1.0" vendorVersion="9.0" packageType="LW64" releaseID="A1B2C9.0">
+  <Name><Display lang="en">Pacote sintético de teste</Display></Name>
+  <ComponentType value="DRVR"/>
+  <SupportedDevices>
+    <Device componentID="9000"><PCIInfo vendorID="8086" deviceID="1234" subVendorID="1028" subDeviceID="ABCD"/></Device>
+  </SupportedDevices>
+  <SupportedOperatingSystems>
+    <OperatingSystem osVendor="Microsoft" osArch="x64" osCode="W14TS"><Display lang="en">Microsoft - Windows Server 2016 - Standard</Display></OperatingSystem>
+  </SupportedOperatingSystems>
+</SoftwareComponent>

@@ -18,7 +18,8 @@ Modelo (padrão): consulta os downloads pelo modelo e pelo Windows Server instal
 ServiceTag é uma opção experimental, sem sucesso online confirmado; a Dell pode
 bloquear esse acesso automatizado com HTTP 403.
 .PARAMETER ArquivoInventario
-Reutiliza um inventário textual já coletado neste servidor, com Exiting DSU! ao final.
+Reutiliza um inventário XML SVMInventory ou texto do DSU deste mesmo servidor.
+O texto precisa conter Exiting DSU!; o XML precisa estar completo e válido.
 Válido para Fonte Site; evita repetir uma consulta demorada do DSU.
 .PARAMETER ArquivoSiteDell
 Importa os downloads de um arquivo .har exportado manualmente do Edge ou Chrome.
@@ -29,6 +30,13 @@ Não combine com Catalogo. Consulte docs/Importacao-Manual-Dell.md para capturar
 Código opcional do produto na URL Dell, por exemplo poweredge-r530.
 .PARAMETER CodigoSO
 Código opcional do SO na URL Dell. Por padrão é identificado pelo Windows instalado.
+.PARAMETER AnalisePacotes
+Automatica (padrão): baixa DUPs candidatos, valida SHA256/assinatura Dell e extrai
+metadados sem instalar. Desativada mantém apenas as referências incorporadas.
+.PARAMETER CaminhoCachePacotes
+Cache local de downloads. Padrão: ProgramData\RelatorioDell\CachePacotes. Não usa UNC para executar DUPs.
+.PARAMETER LimitePacotes
+Máximo de pacotes examinados por execução (padrão 30); limites/falhas ficam no diagnóstico.
 .PARAMETER Catalogo
 URL HTTPS ou arquivo local/UNC .xml.gz, .gz ou .xml de um catálogo atualizado.
 As assinaturas disponíveis devem acompanhar o catálogo local. Informar este
@@ -44,6 +52,9 @@ param(
     [ValidateNotNullOrEmpty()][string]$ArquivoSiteDell,
     [string]$CodigoProduto,
     [string]$CodigoSO,
+    [ValidateSet('Automatica','Desativada')][string]$AnalisePacotes = 'Automatica',
+    [string]$CaminhoCachePacotes,
+    [ValidateRange(1,500)][int]$LimitePacotes = 30,
     [string]$Catalogo = 'https://downloads.dell.com/catalog/Catalog.xml.gz',
     [ValidateRange(1, 180)][int]$TempoLimiteDSUMinutos = 10
 )
@@ -679,20 +690,46 @@ function Get-DellHarRequestContext {
     }
 }
 
+function Get-DellPackageUrl {
+    param([string]$Url, [string]$Nome)
+    $uri = $null
+    if ($Nome -notmatch '^[A-Za-z0-9_.-]+\.(?:exe|zip|cab)$' -or -not [uri]::TryCreate($Url,[UriKind]::Absolute,[ref]$uri) -or
+        $uri.Scheme -ne 'https' -or $uri.Host -notin @('downloads.dell.com','dl.dell.com') -or $uri.Port -ne 443 -or
+        $uri.UserInfo -or $uri.Query -or $uri.Fragment -or [uri]::UnescapeDataString([IO.Path]::GetFileName($uri.AbsolutePath)) -ine $Nome) {
+        throw 'URL de pacote inválida: exige HTTPS, domínio oficial de downloads Dell e nome exato do arquivo, sem credenciais/query/fragmento.'
+    }
+    # O mesmo repositório oficial atende o alias dl.dell.com; não segue redirects.
+    $canonica = New-Object UriBuilder($uri)
+    $canonica.Host = 'downloads.dell.com'
+    return $canonica.Uri.AbsoluteUri
+}
+
+function ConvertTo-DellPackageFileReference {
+    param($Arquivo)
+    $nome=[string](Get-ObjectValue $Arquivo 'FileName')
+    $url=''
+    try { $url=Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) $nome } catch { }
+    $hash=[string](Get-ObjectValue $Arquivo 'SHA256')
+    if ($hash -notmatch '^[A-Fa-f0-9]{64}$') { $hash='' }
+    $tamanho=[int64]0
+    [void][int64]::TryParse([string](Get-ObjectValue $Arquivo 'FileSize'),[ref]$tamanho)
+    [pscustomobject]@{FileName=$nome; FileType=[string](Get-ObjectValue $Arquivo 'FileType'); HttpFileLocation=$url; SHA256=$hash.ToUpperInvariant(); FileSize=[Math]::Max([int64]0,$tamanho)}
+}
+
 function ConvertTo-DellHarReference {
     param($Raiz)
     # Copia somente os campos usados na comparação. Não propaga cookies,
     # cabeçalhos, HTML, outros acessos nem identificadores da consulta por tag.
     $downloads = foreach ($item in @($Raiz.DriverListData)) {
         $formatos = foreach ($formato in @((Get-ObjectValue $item 'OthFileFrmts'))) {
-            if ($null -ne $formato) { [pscustomobject]@{ FileName = [string](Get-ObjectValue $formato 'FileName'); FileType = [string](Get-ObjectValue $formato 'FileType') } }
+            if ($null -ne $formato) { ConvertTo-DellPackageFileReference $formato }
         }
         $principal = Get-ObjectValue $item 'FileFrmtInfo'
         [pscustomobject][ordered]@{
             DriverId = [string]$item.DriverId; DriverName = [string]$item.DriverName; Type = [string]$item.Type
             DellVer = [string]$item.DellVer; Imp = [string](Get-ObjectValue $item 'Imp')
             ReleaseDate = [string]$item.ReleaseDate; CatName = [string](Get-ObjectValue $item 'CatName')
-            FileFrmtInfo = if ($null -ne $principal) { [pscustomobject]@{ FileName = [string](Get-ObjectValue $principal 'FileName'); FileType = [string](Get-ObjectValue $principal 'FileType') } } else { $null }
+            FileFrmtInfo = if ($null -ne $principal) { ConvertTo-DellPackageFileReference $principal } else { $null }
             OthFileFrmts = @($formatos)
         }
     }
@@ -819,6 +856,128 @@ function Read-SharedText {
     try { return $leitor.ReadToEnd() } finally { $leitor.Dispose(); $stream.Dispose() }
 }
 
+function ConvertFrom-DsuInventoryXml {
+    param([string]$Texto)
+    # SVMInventory observado no coletor Dell. Não resolve DTDs ou entidades externas.
+    $config = New-Object Xml.XmlReaderSettings
+    $config.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $config.XmlResolver = $null
+    $config.MaxCharactersInDocument = 10MB
+    $origem = New-Object IO.StringReader($Texto)
+    $leitor = [Xml.XmlReader]::Create($origem, $config)
+    try {
+        $xml = New-Object Xml.XmlDocument
+        $xml.XmlResolver = $null
+        $xml.Load($leitor)
+    }
+    finally { $leitor.Dispose(); $origem.Dispose() }
+    $raiz = $xml.DocumentElement
+    if ($null -eq $raiz -or $raiz.Name -cne 'SVMInventory' -or $raiz.NamespaceURI -or $raiz.GetAttribute('schemaVersion') -ne '1.0') {
+        throw 'XML de inventário não reconhecido. Esperado SVMInventory schemaVersion=1.0; não use um catálogo ou relatório JSON.'
+    }
+    $dispositivos = @($raiz.SelectNodes('Device'))
+    if ($dispositivos.Count -eq 0) { throw 'XML de inventário sem dispositivos. A coleta não pode ser considerada concluída.' }
+    foreach ($dispositivo in $dispositivos) {
+        $aplicacoes = @($dispositivo.SelectNodes('Application'))
+        if ($aplicacoes.Count -eq 0) { throw 'XML de inventário contém dispositivo sem Application; coleta incompleta ou schema diferente.' }
+        foreach ($aplicacao in $aplicacoes) {
+            foreach ($atributo in @('display', 'version', 'componentType')) {
+                if ([string]::IsNullOrWhiteSpace($aplicacao.GetAttribute($atributo))) { throw "XML de inventário contém Application sem $atributo." }
+            }
+            # Preserva cada instância, inclusive discos iguais em baias diferentes.
+            [pscustomobject]@{
+                Nome = $aplicacao.GetAttribute('display').Trim()
+                Tipo = $aplicacao.GetAttribute('componentType').Trim()
+                Versao = $aplicacao.GetAttribute('version').Trim()
+                ModeloDispositivo = $dispositivo.GetAttribute('display').Trim()
+                ComponentID = $dispositivo.GetAttribute('componentID').Trim()
+                FQDD = $dispositivo.GetAttribute('FQDD').Trim()
+                VendorID = $dispositivo.GetAttribute('vendorID').Trim()
+                DeviceID = $dispositivo.GetAttribute('deviceID').Trim()
+                SubVendorID = $dispositivo.GetAttribute('subVendorID').Trim()
+                SubDeviceID = $dispositivo.GetAttribute('subDeviceID').Trim()
+                Bus = $dispositivo.GetAttribute('bus').Trim()
+                Device = $dispositivo.GetAttribute('device').Trim()
+                Function = $dispositivo.GetAttribute('function').Trim()
+                Enumerador = $dispositivo.GetAttribute('enum').Trim()
+            }
+        }
+    }
+}
+
+function Import-DsuInventory {
+    param([string]$Arquivo, [string]$Pasta)
+    # Obtém uma cópia estável; StreamReader reconhece BOM UTF-16 do XML Dell.
+    $stream = [IO.File]::Open($Arquivo, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -gt 10MB) { throw 'Inventário excede o limite de 10 MiB.' }
+        $leitor = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+        try { $texto = $leitor.ReadToEnd() } finally { $leitor.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    $ehXml = ([IO.Path]::GetExtension($Arquivo) -ieq '.xml' -or $texto.TrimStart().StartsWith('<'))
+    if ($ehXml) { $lista = @(ConvertFrom-DsuInventoryXml -Texto $texto); $extensao = 'xml' }
+    else { $lista = @(Get-ValidatedInventory -Texto $texto -ExigirEncerramento); $extensao = 'txt' }
+    if ($Pasta) {
+        # Salva um snapshot com declaração coerente; nunca altera o arquivo recebido.
+        $snapshot = $texto
+        if ($ehXml) { $snapshot = $snapshot -replace '(?i)encoding\s*=\s*["'']UTF-16["'']', 'encoding="UTF-8"' }
+        [IO.File]::WriteAllText((Join-Path $Pasta "inventory.importado.$extensao"), $snapshot, (New-Object Text.UTF8Encoding($true)))
+    }
+    Write-Log "Inventário $extensao validado: $($lista.Count) componentes."
+    return $lista
+}
+
+function Get-SiteInventoryArguments {
+    param([string]$Ajuda, [string]$ArquivoXml)
+    if ($Ajuda -notmatch '(?im)(?<![\w-])--inventory(?=[\s=,\[\]<>;:]|$)') { throw 'A ajuda do DSU não confirmou --inventory. Consulte help.stdout.txt.' }
+    if ($Ajuda -match '(?im)(?<![\w-])--output-inventory-xml(?=[\s=,\[\]<>;:]|$)') {
+        return @('--inventory', ('--output-inventory-xml=' + $ArquivoXml))
+    }
+    Write-Log 'Esta versão do DSU não anuncia --output-inventory-xml; usando texto, com menor identificação de hardware.' 'AVISO'
+    return @('--inventory')
+}
+
+function Get-DellDiskRule {
+    param($Instalado)
+    # Regras locais restritas à identidade observada e ao pacote Dell verificado.
+    # O coletor observado abrevia o modelo Seagate: CID e FQDD são exigidos.
+    if ($Instalado.Tipo -ne 'FRMW' -or ([string](Get-ObjectValue $Instalado 'FQDD')) -notmatch '^Disk\.Bay\.\d+:') { return $null }
+    $modeloDisco = [string](Get-ObjectValue $Instalado 'ModeloDispositivo')
+    $cid = [string](Get-ObjectValue $Instalado 'ComponentID')
+    if ($cid -eq '105266' -and $modeloDisco -eq 'MG04SCA20ENY') {
+        return [pscustomobject]@{ DriverId='RG9MK'; ModeloTitulo='MG04SCA20ENY'; VersaoAlvo='EG03'; Anteriores=@('EG02') }
+    }
+    if ($cid -eq '111175' -and $modeloDisco -in @('ST8000NM023B-2TJ', 'ST8000NM023B-2TJ133')) {
+        return [pscustomobject]@{ DriverId='P183W'; ModeloTitulo='ST8000NM023B'; VersaoAlvo='LA0C'; Anteriores=@('LA0B') }
+    }
+    return $null
+}
+
+function Get-DsuSiteInventory {
+    param([string]$Executavel, [string]$Ajuda, [string]$Pasta, [int]$LimiteMinutos)
+    $arquivoXml = Join-Path $Pasta 'inventory.xml'
+    $argumentos = @(Get-SiteInventoryArguments -Ajuda $Ajuda -ArquivoXml $arquivoXml)
+    $bruto = Invoke-DsuReadOnly $Executavel $argumentos 'inventory' $LimiteMinutos
+    if ($bruto.ExitCode -ne 0) { throw "Inventário DSU falhou (código $($bruto.ExitCode)). Consulte os arquivos brutos." }
+    if ($argumentos.Count -gt 1) {
+        # Se o DSU prometeu XML, ausência ou corrupção são erro, sem fallback.
+        $lista = @(Import-DsuInventory -Arquivo $arquivoXml)
+        if ($bruto.Text -match '(?im)^\s*(?:ERROR\b|FATAL\b|Failed\b|Unable\b|Could\s+not\b)') { throw 'DSU retornou mensagem de falha durante a coleta XML; consulte inventory.stdout.txt.' }
+        return $lista
+    }
+    return Get-ValidatedInventory -Texto $bruto.Text
+}
+
+function Compare-DellDiskVersion {
+    param($Regra, [string]$Instalada, [string]$Disponivel)
+    # Não ordena firmware alfanumérico. Só reconhece pares explícitos da regra.
+    if ($null -eq $Regra -or $Disponivel -cne $Regra.VersaoAlvo) { return $null }
+    if ($Instalada -ceq $Regra.VersaoAlvo) { return 0 }
+    if ($Instalada -cin $Regra.Anteriores) { return -1 }
+    return $null
+}
+
 function Compare-DottedVersion {
     param([string]$Instalada, [string]$Disponivel)
     # Retorna null para versões alfanuméricas, zeros ou formatos não comparáveis.
@@ -836,6 +995,213 @@ function Compare-DottedVersion {
         if ($va -gt $vb) { return 1 }
     }
     return 0
+}
+
+function Get-BroadcomPciProfile {
+    param($Dispositivo)
+    # Tuplas completas confirmadas em SupportedDevices do DUP oficial DFF48/49X84.
+    $ids = @('VendorID','DeviceID','SubVendorID','SubDeviceID') | ForEach-Object { ([string](Get-ObjectValue $Dispositivo $_)).ToUpperInvariant() }
+    $chave = $ids -join ':'
+    if ($chave -in @('14E4:165F:14E4:2003','14E4:165F:1028:0639')) { return $chave }
+    return ''
+}
+
+function Get-DellWindowsNetworkDrivers {
+    # Consulta local de drivers de hardware. Não consulta Windows Update ou patches.
+    $drivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID LIKE 'PCI%'" -OperationTimeoutSec 30 -ErrorAction Stop)
+    foreach ($driver in $drivers) {
+        $id = [string](Get-ObjectValue $driver 'DeviceID')
+        if ($id -notmatch '(?i)^PCI\\VEN_(?<vendor>[0-9A-F]{4})&DEV_(?<device>[0-9A-F]{4})&SUBSYS_(?<subdevice>[0-9A-F]{4})(?<subvendor>[0-9A-F]{4})(?:&|\\|$)') { continue }
+        $registro = [pscustomobject]@{
+            PnpDeviceID=$id; Nome=[string](Get-ObjectValue $driver 'DeviceName')
+            VendorID=$Matches.vendor; DeviceID=$Matches.device
+            SubVendorID=$Matches.subvendor; SubDeviceID=$Matches.subdevice
+            Versao=[string](Get-ObjectValue $driver 'DriverVersion')
+            Provedor=[string](Get-ObjectValue $driver 'DriverProviderName')
+            InfName=[string](Get-ObjectValue $driver 'InfName')
+            Assinado=(Get-ObjectValue $driver 'IsSigned')
+            Classe=[string](Get-ObjectValue $driver 'DeviceClass')
+        }
+        # Coleta interfaces PCI, independentemente do modelo/provedor. Só um pacote
+        # Dell validado poderá transformar esses dados em pendência no relatório.
+        $registro
+    }
+}
+
+function Get-PciDeviceKey {
+    param($Dispositivo)
+    $ids = @('VendorID','DeviceID','SubVendorID','SubDeviceID') | ForEach-Object { ([string](Get-ObjectValue $Dispositivo $_)).ToUpperInvariant() }
+    if (@($ids | Where-Object { $_ -notmatch '^[0-9A-F]{4}$' }).Count -or $ids[0] -in @('0000','FFFF') -or $ids[2] -in @('0000','FFFF')) { return '' }
+    return ($ids -join ':')
+}
+
+function Get-DellDriverDefinitions {
+    # DADOS DE REFERÊNCIA: mantidos separados da engine. Não há modelo de servidor,
+    # Service Tag, provedor instalado ou número fixo de interfaces nestes critérios.
+    $dados = @'
+[
+    {
+        "Id":  "Dell-49X84-NDIS",
+        "ComponentIDs":  [
+                             "8641"
+                         ],
+        "NomeInventario":  "Broadcom NetXtreme Driver Family",
+        "Classe":  "NET",
+        "FamiliasPCI":  [
+                            "14E4:1657",
+                            "14E4:165F"
+                        ],
+        "PerfisPCI":  [
+                          "14E4:165F:14E4:2003",
+                          "14E4:1657:14E4:1904",
+                          "14E4:165F:1028:1F5B",
+                          "14E4:1657:14E4:1905",
+                          "14E4:165F:1028:04F6",
+                          "14E4:165F:1028:04F7",
+                          "14E4:165F:1028:04F8",
+                          "14E4:165F:1028:04F9",
+                          "14E4:165F:1028:04FA",
+                          "14E4:165F:1028:04DC",
+                          "14E4:165F:1028:05E5",
+                          "14E4:165F:1028:1F54",
+                          "14E4:165F:1028:0639",
+                          "14E4:165F:1028:063B",
+                          "14E4:165F:1028:06A5",
+                          "14E4:165F:1028:06A6",
+                          "14E4:165F:1028:06A7",
+                          "14E4:165F:1028:001F",
+                          "14E4:165F:1028:000A",
+                          "14E4:165F:14E4:4120",
+                          "14E4:165F:14E4:4160",
+                          "14E4:165F:1028:07F7",
+                          "14E4:165F:1028:088E",
+                          "14E4:165F:1028:0890",
+                          "14E4:165F:1028:088F",
+                          "14E4:165F:1028:0891",
+                          "14E4:165F:1028:1FEC",
+                          "14E4:165F:14E4:2018",
+                          "14E4:165F:1028:08FD",
+                          "14E4:165F:1028:0900",
+                          "14E4:165F:1028:08FF",
+                          "14E4:165F:1028:0917",
+                          "14E4:165F:1028:0A17"
+                      ],
+        "DriverId":  "49X84",
+        "VersaoFamilia":  "21.80.3",
+        "VersaoDriver":  "214.0.0.6",
+        "EspacoVersao":  "NDIS",
+        "Sistemas":  [
+                         "WST14",
+                         "WS19L"
+                     ],
+        "Arquivo":  "Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+        "TipoArquivo":  "LW64",
+        "Fonte":  "https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt"
+    }
+]
+'@
+    foreach ($definicao in (ConvertFrom-Json -InputObject $dados)) { $definicao }
+}
+
+function Get-DellDriverReference {
+    param([object[]]$Definicoes, [object[]]$Downloads, [string]$SO)
+    $falha = [pscustomobject]@{Valido=$false; Motivo='Não há pacote Dell com identidade, arquivo, versão de driver e Windows validados nos metadados disponíveis.'}
+    $candidatos = @(
+        foreach ($def in $Definicoes) {
+            if ($def.Classe -notin @('NET','SCSIAdapter','HDC','System','Display','Media','USB') -or $null -eq (Compare-DottedVersion $def.VersaoDriver $def.VersaoDriver)) { continue }
+            if ($SO -notin $def.Sistemas) { continue }
+            foreach ($pacote in @($Downloads | Where-Object { $_.Type -eq 'DRVR' -and $_.DriverId -eq $def.DriverId })) {
+                if (([string]$pacote.DellVer -split ',')[0].Trim() -cne $def.VersaoFamilia) { continue }
+                $arquivo = Get-SiteWindowsPackage $pacote
+                if ($null -eq $arquivo -or (Get-ObjectValue $arquivo 'FileName') -ine $def.Arquivo -or (Get-ObjectValue $arquivo 'FileType') -ine $def.TipoArquivo) { continue }
+                $data = Get-SiteReleaseDate $pacote
+                if ($data -eq [datetime]::MinValue) { continue }
+                [pscustomobject]@{Valido=$true; Definicao=$def; Pacote=$pacote; Arquivo=$arquivo; Data=$data}
+            }
+        }
+    )
+    if ($candidatos.Count -eq 0) { return $falha }
+    $ultima = ($candidatos | Sort-Object Data -Descending | Select-Object -First 1).Data
+    $recentes = @($candidatos | Where-Object Data -eq $ultima)
+    $chaves = @($recentes | ForEach-Object { $_.Definicao | ConvertTo-Json -Depth 8 -Compress } | Select-Object -Unique)
+    if ($chaves.Count -ne 1) { $falha.Motivo='Mais de uma referência de driver na mesma data; associação ambígua.'; return $falha }
+    return $recentes[0]
+}
+
+function Get-DellInstalledDriverGroups {
+    param([object[]]$Inventario, [object[]]$DriversWindows, $Definicao)
+    $falha = [pscustomobject]@{Valido=$false; Grupos=@(); Motivo='Faltam dados CIM completos para os dispositivos atendidos pelo pacote Dell.'}
+    $interfaces = @($Inventario | Where-Object { $_.Tipo -eq 'FRMW' -and (('{0}:{1}' -f (Get-ObjectValue $_ 'VendorID'),(Get-ObjectValue $_ 'DeviceID')).ToUpperInvariant()) -in $Definicao.FamiliasPCI })
+    $evidencias = @($DriversWindows | Where-Object { (('{0}:{1}' -f (Get-ObjectValue $_ 'VendorID'),(Get-ObjectValue $_ 'DeviceID')).ToUpperInvariant()) -in $Definicao.FamiliasPCI })
+    if ($evidencias.Count -eq 0) { return $falha }
+    foreach ($item in @($interfaces) + @($evidencias)) {
+        if ((Get-PciDeviceKey $item) -notin $Definicao.PerfisPCI) { $falha.Motivo='Um perfil PCI desta família não está confirmado nos metadados do pacote Dell.'; return $falha }
+    }
+    # Quando o XML traz as interfaces, exige cobertura completa por perfil. Sem
+    # firmware inventariado, a identidade CIM local pode comprovar o hardware.
+    if ($interfaces.Count) {
+        $perfis = @($interfaces | ForEach-Object { Get-PciDeviceKey $_ } | Select-Object -Unique)
+        if ($interfaces.Count -ne $evidencias.Count) { return $falha }
+        foreach ($perfil in $perfis) {
+            if (@($interfaces | Where-Object { (Get-PciDeviceKey $_) -eq $perfil }).Count -ne @($evidencias | Where-Object { (Get-PciDeviceKey $_) -eq $perfil }).Count) { return $falha }
+        }
+    }
+    $ids = @($evidencias | ForEach-Object { [string](Get-ObjectValue $_ 'PnpDeviceID') } | Select-Object -Unique)
+    if ($ids.Count -ne $evidencias.Count) { $falha.Motivo='Identidades CIM duplicadas; não é possível atribuir as instâncias com segurança.'; return $falha }
+    foreach ($item in $evidencias) {
+        $classeCim=[string](Get-ObjectValue $item 'Classe')
+        if($classeCim -and $classeCim -ine $Definicao.Classe){$falha.Motivo='Classe CIM diverge da classe do driver de referência.'; return $falha}
+        $id = [string](Get-ObjectValue $item 'PnpDeviceID')
+        if ($id -notmatch '(?i)^PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})(?:&[^\\]*)?\\[^\\]+$') { $falha.Motivo='Identidade PCI/PNP ausente ou inválida no CIM.'; return $falha }
+        $chaveId = ('{0}:{1}:{2}:{3}' -f $Matches[1],$Matches[2],$Matches[4],$Matches[3]).ToUpperInvariant()
+        if ($chaveId -ne (Get-PciDeviceKey $item)) { $falha.Motivo='A identidade PNP diverge dos PCI IDs normalizados.'; return $falha }
+        if ((Get-ObjectValue $item 'Assinado') -isnot [bool] -or (Get-ObjectValue $item 'Assinado') -ne $true) { $falha.Motivo='O CIM não confirmou a assinatura de todos os drivers associados.'; return $falha }
+        if ($null -eq (Compare-DottedVersion ([string](Get-ObjectValue $item 'Versao')) $Definicao.VersaoDriver)) { $falha.Motivo='Versão de driver CIM zero ou não comparável ao espaço de versão validado.'; return $falha }
+    }
+    # Provedor é dado de auditoria, não critério de aplicabilidade. Versões distintas
+    # geram grupos próprios, sem escolher uma versão para toda a família.
+    $grupos = @($evidencias | Group-Object Versao | ForEach-Object {
+        [pscustomobject]@{Versao=$_.Name; Quantidade=$_.Count
+            InfName=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'InfName'} | Select-Object -Unique) -join ' | ')
+            Provedor=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'Provedor'} | Select-Object -Unique) -join ' | ')
+            PnpDeviceIDs=(@($_.Group | ForEach-Object {Get-ObjectValue $_ 'PnpDeviceID'}) -join ' | ')
+        }
+    })
+    return [pscustomobject]@{Valido=$true; Grupos=$grupos; Motivo=''}
+}
+
+function New-DellDriverAssessmentRows {
+    param($Base, [object[]]$Definicoes, [object[]]$Inventario, [object[]]$DriversWindows, [object[]]$Downloads, [string]$SO)
+    if(@($DriversWindows).Count) {
+        $presentes=@($DriversWindows | ForEach-Object {Get-PciDeviceKey $_} | Where-Object {$_} | Select-Object -Unique)
+        $Definicoes=@($Definicoes | Where-Object {@($_.PerfisPCI | Where-Object {$_ -in $presentes}).Count -gt 0})
+        if(-not $Definicoes.Count){$Base.Motivo='Nenhum perfil PCI dos metadados do pacote corresponde aos drivers CIM locais.';return $Base}
+    }
+    $referencia = Get-DellDriverReference -Definicoes $Definicoes -Downloads $Downloads -SO $SO
+    if (-not $referencia.Valido) { $Base.Motivo=$referencia.Motivo; return $Base }
+    $def = $referencia.Definicao
+    $instalados = Get-DellInstalledDriverGroups -Inventario $Inventario -DriversWindows $DriversWindows -Definicao $def
+    if (-not $instalados.Valido) { $Base.Motivo=$instalados.Motivo; return $Base }
+    foreach ($grupo in $instalados.Grupos) {
+        $linha = $Base.PSObject.Copy()
+        if ($instalados.Grupos.Count -gt 1) { $linha.Componente += " [$($grupo.Quantidade) dispositivo(s), $($def.EspacoVersao) $($grupo.Versao)]" }
+        $linha.VersaoAtual=$grupo.Versao; $linha.VersaoNova=$def.VersaoDriver
+        $linha.FonteVersao="CIM Win32_PnPSignedDriver; versão $($def.EspacoVersao)"
+        $linha.InfName=$grupo.InfName; $linha.QuantidadeDispositivosDriver=[string]$grupo.Quantidade
+        $linha.ProvedorDriver=$grupo.Provedor; $linha.PnpDeviceIDs=$grupo.PnpDeviceIDs
+        $linha.Categoria=[string](Get-ObjectValue $referencia.Pacote 'CatName')
+        $linha.Criticidade=ConvertTo-CriticalityLabel ([string](Get-ObjectValue $referencia.Pacote 'Imp'))
+        if (-not $linha.Criticidade) { $linha.Criticidade='Não informada' }
+        $linha.DataDeLancamento=$referencia.Data.ToString('yyyy-MM-dd')
+        $linha.NomeDoPacote=$def.Arquivo
+        $linha.URL='https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid='+$def.DriverId
+        $comparacao=Compare-DottedVersion $grupo.Versao $def.VersaoDriver
+        if ($comparacao -lt 0) { $linha.Status='Pendente' }
+        elseif ($comparacao -eq 0) { $linha.Status='Atualizado na referência' }
+        else { $linha.Status='Acima da referência' }
+        $linha.Motivo="Driver associado por identidade PCI completa e metadados do pacote Dell $($def.DriverId); comparação $($def.EspacoVersao). Provedor instalado é informativo. Validar combinação firmware/driver e pré-requisitos antes de instalar."
+        $linha
+    }
 }
 
 function Get-SiteReleaseDate {
@@ -861,20 +1227,59 @@ function Get-SiteWindowsPackage {
 }
 
 function New-SiteAssessmentRows {
-    param([object[]]$Inventario, [object[]]$Downloads, [string]$Hostname, [string]$ServiceTag, [string]$Modelo, [string]$SO)
-    foreach ($instalado in $Inventario) {
+    param([object[]]$Inventario, [object[]]$Downloads, [string]$Hostname, [string]$ServiceTag, [string]$Modelo, [string]$SO, [object[]]$DriversWindows = @(), [object[]]$MetadadosDrivers = $null)
+    if ($null -eq $MetadadosDrivers) { $MetadadosDrivers = @(Get-DellDriverDefinitions) }
+    $familiasProcessadas = @{}
+    $inventarioAvaliacao = @($Inventario)
+    # Nem todo modelo/coletor fornece um registro DRVR de família. A evidência
+    # local de hardware e um pacote Dell na referência permitem completar a lista.
+    foreach ($def in $MetadadosDrivers) {
+        if ($def.Classe -notin @('NET','SCSIAdapter','HDC','System','Display','Media','USB') -or $SO -notin $def.Sistemas) { continue }
+        $jaExiste = @($inventarioAvaliacao | Where-Object {
+            $cidExistente = [string](Get-ObjectValue $_ 'ComponentID')
+            $_.Tipo -eq 'DRVR' -and (($cidExistente -and $cidExistente -in $def.ComponentIDs) -or (-not $cidExistente -and $_.Nome -eq $def.NomeInventario))
+        }).Count
+        if ($jaExiste) { continue }
+        if (@($Downloads | Where-Object { $_.Type -eq 'DRVR' -and $_.DriverId -eq $def.DriverId }).Count -eq 0) { continue }
+        if (@($DriversWindows | Where-Object { (Get-PciDeviceKey $_) -in $def.PerfisPCI }).Count -eq 0) { continue }
+        $cidComplementar=if(@($def.ComponentIDs).Count){$def.ComponentIDs[0]}else{''}
+        $inventarioAvaliacao += [pscustomobject]@{Nome=$def.NomeInventario;Tipo='DRVR';Versao='Não informada pelo DSU';ComponentID=$cidComplementar;OrigemComplementar='CIM'}
+    }
+    foreach ($instalado in $inventarioAvaliacao) {
         if ($instalado.Tipo -in @('APAC', 'APP', 'EAPP')) { continue }
         $resultado = [pscustomobject][ordered]@{
             Hostname = $Hostname; ServiceTag = $ServiceTag; Modelo = $Modelo
             Componente = $instalado.Nome; Categoria = $instalado.Tipo; VersaoAtual = $instalado.Versao
             VersaoNova = ''; Criticidade = ''; DataDeLancamento = ''; NomeDoPacote = ''
             Status = 'Inconclusivo'; Motivo = ''; URL = ''
+            FonteVersao = 'Inventário DSU'; VersaoDSU = $instalado.Versao
+            InfName = ''; QuantidadeDispositivosDriver = ''
+            ProvedorDriver = ''; PnpDeviceIDs = ''
+            TipoDSU = $instalado.Tipo
         }
+        # Só o CSV de verificação recebe estes campos; o principal mantém 10 colunas.
+        foreach ($campo in @('ModeloDispositivo','ComponentID','FQDD','VendorID','DeviceID','SubVendorID','SubDeviceID','Bus','Device','Function','Enumerador')) {
+            $resultado | Add-Member -NotePropertyName $campo -NotePropertyValue ([string](Get-ObjectValue $instalado $campo))
+        }
+        $regraDisco = Get-DellDiskRule -Instalado $instalado
+        $perfilBroadcom = Get-BroadcomPciProfile -Dispositivo $instalado
+        $modoBroadcom = ''
         $candidatos = @()
         if ($instalado.Tipo -notin @('BIOS', 'FRMW', 'DRVR')) {
             $resultado.Motivo = 'Tipo de componente ausente ou desconhecido no inventário; registro preservado para revisão.'
             $resultado
             continue
+        }
+        if ($instalado.Tipo -eq 'DRVR') {
+            $cid = [string](Get-ObjectValue $instalado 'ComponentID')
+            $definicoes = @($MetadadosDrivers | Where-Object { ($cid -and $cid -in $_.ComponentIDs) -or (-not $cid -and $instalado.Nome -eq $_.NomeInventario) })
+            if ($definicoes.Count) {
+                $chaveFamilia = if ($cid) { 'ComponentID:'+$cid } else { 'Nome:'+$instalado.Nome }
+                if ($familiasProcessadas.ContainsKey($chaveFamilia)) { continue }
+                $familiasProcessadas[$chaveFamilia] = $true
+                New-DellDriverAssessmentRows -Base $resultado -Definicoes $definicoes -Inventario $Inventario -DriversWindows $DriversWindows -Downloads $Downloads -SO $SO
+                continue
+            }
         }
         # Regras deliberadamente específicas: o título genérico de uma NIC/disco
         # e a versão do pacote não comprovam a versão do firmware de cada dispositivo.
@@ -892,8 +1297,16 @@ function New-SiteAssessmentRows {
         elseif ($instalado.Tipo -eq 'FRMW' -and $instalado.Nome -match '(?i)^System CPLD$') {
             $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverName -match '(?i)\bCPLD\b' })
         }
+        elseif ($null -ne $regraDisco) {
+            $modeloTitulo = '(?i)(?<![A-Za-z0-9])' + [regex]::Escape($regraDisco.ModeloTitulo) + '(?![A-Za-z0-9])'
+            $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverId -eq $regraDisco.DriverId -and $_.DriverName -match $modeloTitulo })
+        }
+        elseif ($instalado.Tipo -eq 'FRMW' -and $perfilBroadcom) {
+            $modoBroadcom = 'Firmware'
+            $candidatos = @($Downloads | Where-Object { $_.Type -eq 'FRMW' -and $_.DriverId -eq 'DFF48' -and $_.DriverName -match '(?i)Broadcom.*NetXtreme(?!-E)' })
+        }
         else {
-            $resultado.Motivo = 'O inventário textual não permite confirmar o modelo e a correspondência da versão instalada com a versão do pacote do site.'
+            $resultado.Motivo = 'Não há regra validada para associar a identidade deste dispositivo e sua versão ao pacote Dell. Consulte os identificadores no CSV de verificação; ausência de regra não significa ausência de atualização.'
             if ($instalado.Versao -match '^0+(?:\.0+)*$') { $resultado.Motivo = 'DSU informou versão zero; não é uma versão instalada válida para comparação.' }
             $resultado
             continue
@@ -917,6 +1330,13 @@ function New-SiteAssessmentRows {
         $pacote = $mesmaData[0]
         $arquivo = Get-SiteWindowsPackage $pacote
         $nova = ([string]$pacote.DellVer -split ',')[0].Trim()
+        if ($modoBroadcom -eq 'Firmware') {
+            if ((Compare-DottedVersion $nova '22.00.6') -ne 0 -or $nova -notmatch '^22\.0{1,2}\.6$' -or $resultado.VersaoAtual -notmatch '^\d{2}\.\d{1,2}\.\d{1,3}$') {
+                $resultado.Motivo = 'Perfil PCI associado ao DFF48, mas a versão não corresponde ao formato FFV validado ou à referência 22.00.6.'
+                $resultado
+                continue
+            }
+        }
         $resultado.VersaoNova = $nova
         $resultado.Categoria = [string](Get-ObjectValue $pacote 'CatName')
         $resultado.Criticidade = ConvertTo-CriticalityLabel ([string](Get-ObjectValue $pacote 'Imp'))
@@ -924,11 +1344,20 @@ function New-SiteAssessmentRows {
         $resultado.DataDeLancamento = $ultimaData.ToString('yyyy-MM-dd')
         $resultado.NomeDoPacote = [string](Get-ObjectValue $arquivo 'FileName')
         $resultado.URL = 'https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid=' + $pacote.DriverId
-        $comparacao = Compare-DottedVersion -Instalada $instalado.Versao -Disponivel $nova
+        if ($null -ne $regraDisco) { $comparacao = Compare-DellDiskVersion -Regra $regraDisco -Instalada $instalado.Versao -Disponivel $nova }
+        else { $comparacao = Compare-DottedVersion -Instalada $resultado.VersaoAtual -Disponivel $nova }
         if ($null -eq $comparacao) { $resultado.Motivo = 'Versões alfanuméricas, zero ou formatos não comparáveis automaticamente.' }
         elseif ($comparacao -lt 0) { $resultado.Status = 'Pendente'; $resultado.Motivo = 'Componente identificado; versão instalada inferior à versão publicada na referência consultada.' }
         elseif ($comparacao -eq 0) { $resultado.Status = 'Atualizado na referência'; $resultado.Motivo = 'A versão instalada coincide com a versão publicada na referência consultada.' }
         else { $resultado.Status = 'Acima da referência'; $resultado.Motivo = 'A versão instalada é superior à referência consultada; não sugerir downgrade.' }
+        if ($null -ne $regraDisco) {
+            if ($null -eq $comparacao) { $resultado.Motivo = 'Disco associado, mas o par de versões não consta na regra validada; não é usada ordem alfabética para firmware.' }
+            else { $resultado.Motivo += ' Regra local por modelo, ComponentID, FQDD, DriverId e par de versões explícito; validar aplicabilidade e pré-requisitos do DUP antes de instalar.' }
+        }
+        if ($modoBroadcom -eq 'Firmware') {
+            $resultado.Motivo += ' Associação pelos quatro PCI IDs do package.xml do DFF48; comparação da Family Firmware Version, sem executar DUP. Validar combinação de firmware/driver antes de instalar.'
+            if ($SO -eq 'WST14') { $resultado.Motivo += ' Windows Server 2016 não consta nos SOs listados para DFF48; a pendência de firmware não autoriza executar esse DUP no Windows 2016. Validar método de atualização fora do SO com a Dell.' }
+        }
         $resultado
     }
 }
@@ -953,6 +1382,587 @@ function Export-SiteAssessment {
     [IO.File]::WriteAllLines($auditoria, [string[]]$texto, (New-Object Text.UTF8Encoding($true)))
     Write-Log "Pendências confirmadas: $($pendentes.Count); componentes inconclusivos: $($inconclusivos.Count)."
     Write-Log "Verificação por componente: $auditoria"
+}
+
+function Assert-DellPackageFile {
+    param([string]$Arquivo, [string]$SHA256)
+    if ($SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or (Get-FileHash -LiteralPath $Arquivo -Algorithm SHA256).Hash -ine $SHA256) { throw 'SHA256 do pacote diverge da referência Dell.' }
+    $assinatura=Get-AuthenticodeSignature -LiteralPath $Arquivo -ErrorAction Stop
+    if ($assinatura.Status -ne 'Valid' -or $null -eq $assinatura.SignerCertificate -or $assinatura.SignerCertificate.Subject -notmatch '(?i)(?:^|,\s*)(?:O|CN)=Dell (?:Inc\.?|Technologies(?: Inc\.?)?)(?:,|$)') {
+        throw "Assinatura Authenticode Dell não confirmada (status: $($assinatura.Status)). Nenhum executável foi iniciado."
+    }
+    return [string]$assinatura.SignerCertificate.Thumbprint
+}
+
+function Save-DellPackageDownload {
+    param($Arquivo, [string]$Destino, [System.Collections.IDictionary]$Estado)
+    $url=Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) ([string]$Arquivo.FileName)
+    $esperado=[int64]0
+    [void][int64]::TryParse([string](Get-ObjectValue $Arquivo 'FileSize'),[ref]$esperado)
+    if ($esperado -gt 512MB) { throw 'Pacote excede o limite individual de 512 MiB.' }
+    $request=[Net.HttpWebRequest]::Create($url)
+    $request.AllowAutoRedirect=$false; $request.Timeout=30000; $request.ReadWriteTimeout=15000
+    $request.UserAgent='DellFirmwareReport/1.0'
+    $response=$null; $entrada=$null; $saida=$null
+    try {
+        $response=$request.GetResponse()
+        if ([int]$response.StatusCode -ne 200) { throw 'Download não retornou HTTP 200; redirecionamentos não são seguidos.' }
+        if ($response.ContentLength -gt 512MB) { throw 'Resposta excede 512 MiB.' }
+        $entrada=$response.GetResponseStream()
+        $saida=[IO.File]::Open($Destino,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $buffer=New-Object byte[] 65536; $total=[int64]0; $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
+        while (($n=$entrada.Read($buffer,0,$buffer.Length)) -gt 0) {
+            $total+=$n
+            # Conta bytes recebidos mesmo se validação/extração posterior falhar.
+            if($null -ne $Estado){$Estado['BytesBaixados']=$total}
+            if ($total -gt 512MB -or ($esperado -gt 0 -and $total -gt $esperado) -or $relogio.Elapsed.TotalSeconds -gt 120) { throw 'Download excedeu o tamanho esperado, 512 MiB ou 120 segundos.' }
+            $saida.Write($buffer,0,$n)
+            if($relogio.Elapsed.TotalSeconds -ge $proximoAviso){Write-Log ("Baixando {0}: {1:N1} MiB recebidos." -f $Arquivo.FileName,($total/1MB));$proximoAviso+=15}
+        }
+        if ($total -eq 0 -or ($esperado -gt 0 -and $total -ne $esperado)) { throw 'Download vazio ou tamanho diferente do informado pela Dell.' }
+        return $total
+    }
+    finally { if($saida){$saida.Dispose()}; if($entrada){$entrada.Dispose()}; if($response){$response.Dispose()} }
+}
+
+function Get-DellExtractionPlan {
+    param([string]$Pacote, [string]$Pasta, [string]$SeteZip, [string]$ArquivoLog)
+    if($SeteZip){
+        # Opções básicas: versões antigas podem recusar -bs*. A saída já é
+        # capturada em arquivo; ocultá-la aqui também esconderia o erro real.
+        $argsZip=@('x','-y',('-o'+$Pasta),$Pacote)
+        return [pscustomobject]@{Executavel=$SeteZip;Argumentos=$argsZip
+            LinhaComando=('x -y -o'+(ConvertTo-NativeArgument $Pasta)+' '+(ConvertTo-NativeArgument $Pacote));Metodo='7zip'}
+    }
+    if(-not $ArquivoLog){$ArquivoLog=$Pasta+'.extracao.log'}
+    $destino=[IO.Path]::GetFullPath($Pasta).TrimEnd('\')
+    $log=[IO.Path]::GetFullPath($ArquivoLog)
+    if($log -eq $destino -or $log.StartsWith($destino+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'O log do DUP deve ficar fora da pasta de extração, que precisa estar vazia.'}
+    # /s NUNCA é usado isoladamente: /e é obrigatório e só extrai o DUP.
+    # Alguns frameworks interpretam a linha bruta: aspas somente nos VALORES,
+    # conforme /s /e="pasta" /l="arquivo" da documentação Dell.
+    [pscustomobject]@{Executavel=$Pacote;Argumentos=@('/s',('/e='+$Pasta),('/l='+$log));Metodo='dup'
+        LinhaComando=('/s /e='+(ConvertTo-NativeArgument $Pasta)+' /l='+(ConvertTo-NativeArgument $log))}
+}
+
+function Invoke-DellExtractionProcess {
+    param($Plano, [string]$Diretorio, [string]$PrefixoDiagnostico, [int]$LimiteSegundos=180)
+    $inicio=New-Object Diagnostics.ProcessStartInfo
+    $inicio.FileName=$Plano.Executavel; $inicio.Arguments=$Plano.LinhaComando
+    $inicio.UseShellExecute=$false; $inicio.CreateNoWindow=$true
+    $inicio.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+    $inicio.WorkingDirectory=$Diretorio
+    $inicio.RedirectStandardInput=$true; $inicio.RedirectStandardOutput=$true; $inicio.RedirectStandardError=$true
+    $processo=New-Object Diagnostics.Process; $processo.StartInfo=$inicio
+    $saidaTask=$null; $erroTask=$null; $iniciado=$false; $codigo=$null
+    $versaoExtrator=''
+    if([string](Get-ObjectValue $Plano 'Metodo') -eq '7zip'){
+        try {$versaoExtrator=[Diagnostics.FileVersionInfo]::GetVersionInfo($inicio.FileName).FileVersion}catch{}
+    }
+    $registro=[ordered]@{Executavel=$inicio.FileName;VersaoExtrator=$versaoExtrator;Argumentos=$inicio.Arguments;Diretorio=$Diretorio;Inicio=(Get-Date).ToString('o');PID=$null;CodigoSaida=$null;CodigoHex='';Erro='';CapturaCompleta=$false}
+    $relogio=[Diagnostics.Stopwatch]::StartNew();$proximoAviso=15
+    try {
+        [void]$processo.Start();$iniciado=$true;$registro.PID=$processo.Id
+        $processo.StandardInput.Close()
+        # Pipes lidos em paralelo: ajuda extensa de um DUP não bloqueia o processo.
+        $saidaTask=$processo.StandardOutput.ReadToEndAsync();$erroTask=$processo.StandardError.ReadToEndAsync()
+        while(-not $processo.WaitForExit(1000)) {
+            if($relogio.Elapsed.TotalSeconds -ge $LimiteSegundos){$processo.Kill();[void]$processo.WaitForExit(5000);throw 'Extração excedeu o tempo limite. Verifique auxiliares do extrator.'}
+            if($relogio.Elapsed.TotalSeconds -ge $proximoAviso){Write-Log 'Extração de metadados continua em execução; nenhuma atualização está sendo aplicada.';$proximoAviso+=15}
+        }
+        $codigo=$processo.ExitCode
+        return $codigo
+    }
+    catch {$registro.Erro=$_.Exception.Message;throw}
+    finally {
+        try {
+            if($iniciado -and $processo.HasExited){
+                $registro.CodigoSaida=$processo.ExitCode
+                $registro.CodigoHex='0x'+[BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$processo.ExitCode),0).ToString('X8')
+            }
+            $tarefas=@($saidaTask,$erroTask | Where-Object {$null -ne $_})
+            if($tarefas.Count){$registro.CapturaCompleta=[Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$tarefas,5000)}
+            foreach($par in @(@($saidaTask,'stdout'),@($erroTask,'stderr'))) {
+                $texto='Captura não concluída: processo auxiliar pode manter o pipe aberto.'
+                if($null -ne $par[0] -and $par[0].Status -eq [Threading.Tasks.TaskStatus]::RanToCompletion){$texto=$par[0].GetAwaiter().GetResult()}
+                [IO.File]::WriteAllText(($PrefixoDiagnostico+'.'+$par[1]+'.txt'),$texto,(New-Object Text.UTF8Encoding($true)))
+            }
+            $registro.Fim=(Get-Date).ToString('o')
+            [IO.File]::WriteAllText(($PrefixoDiagnostico+'.processo.json'),(ConvertTo-Json $registro -Depth 4),(New-Object Text.UTF8Encoding($true)))
+        }
+        finally {$processo.Dispose()}
+    }
+}
+
+function Invoke-DellMetadataExtraction {
+    param([string]$Pacote, [string]$Pasta, [string]$SHA256, [string]$PastaLogs)
+    [void](Assert-DellPackageFile $Pacote $SHA256)
+    if(-not $PastaLogs){$PastaLogs=$Pasta+'.logs'}
+    [void][IO.Directory]::CreateDirectory($PastaLogs)
+    # O destino de cada extrator é separado dos logs e de tentativas anteriores.
+    $seteZip=Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+    if(-not (Test-Path -LiteralPath $seteZip -PathType Leaf)){$seteZip='';Write-Log '7-Zip não localizado; usando extração nativa do DUP Dell validado.'}
+    $relogio=[Diagnostics.Stopwatch]::StartNew()
+    for($tentativa=0;$tentativa -lt 2;$tentativa++) {
+        $zipAtual=if($tentativa -eq 0){$seteZip}else{''}
+        $nome=if($zipAtual){'7zip'}else{'dup'}
+        $destino=Join-Path $Pasta $nome
+        [void][IO.Directory]::CreateDirectory($destino)
+        if(@(Get-ChildItem -LiteralPath $destino -Force).Count){throw 'Destino do extrator não está vazio; não será reutilizado.'}
+        $plano=Get-DellExtractionPlan $Pacote $destino $zipAtual (Join-Path $PastaLogs 'dup.log')
+        $restante=180-[int][Math]::Ceiling($relogio.Elapsed.TotalSeconds)
+        if($restante -le 0){throw 'Extração excedeu 3 minutos.'}
+        $codigo=Invoke-DellExtractionProcess $plano $Pasta (Join-Path $PastaLogs $nome) $restante
+        if($seteZip -and $tentativa -eq 0) {
+            $manifestos=@(Get-DellMetadataFiles $destino | Where-Object Name -ieq 'package.xml')
+            if($codigo -ne 0 -or $manifestos.Count -eq 0) {
+                if($codigo -eq 7){Write-Log '7-Zip recusou a linha de comando (código 7); consulte 7zip.stdout.txt e 7zip.stderr.txt. Tentando somente extração /s /e do DUP validado.' 'AVISO'}
+                elseif($codigo -ne 0){Write-Log "7-Zip falhou (código $codigo); consulte os logs. Tentando somente extração /s /e do DUP validado." 'AVISO'}
+                else{Write-Log '7-Zip encerrou sem expor package.xml; tentando somente extração /s /e do DUP Dell validado.'}
+                continue
+            }
+        }
+        if($codigo -ne 0){throw "Extração do DUP falhou (código $codigo)."}
+        # Lê somente o destino que teve sucesso; resíduos do 7-Zip não duplicam manifesto.
+        return $destino
+    }
+}
+
+function Get-DellMetadataFiles {
+    param([string]$Pasta)
+    if(((Get-Item -LiteralPath $Pasta).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Pasta extraída não pode ser reparse point.'}
+    $pilha=New-Object 'System.Collections.Generic.Stack[string]'
+    $pilha.Push([IO.Path]::GetFullPath($Pasta))
+    $total=[int64]0; $quantidade=0
+    while($pilha.Count) {
+        foreach($item in Get-ChildItem -LiteralPath $pilha.Pop() -Force) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Extração contém reparse point; recusada.' }
+            $quantidade++
+            if($quantidade -gt 10000){throw 'Extração contém mais de 10000 entradas.'}
+            if($item.PSIsContainer){$pilha.Push($item.FullName)}
+            else {
+                $total+=$item.Length
+                if($total -gt 2GB){throw 'Conteúdo extraído excede 2 GiB.'}
+                $item
+            }
+        }
+    }
+}
+
+function Read-DellPackageXml {
+    param([string]$Arquivo)
+    if((Get-Item -LiteralPath $Arquivo).Length -gt 20MB){throw 'XML de pacote excede 20 MiB.'}
+    $cfg=New-Object Xml.XmlReaderSettings
+    $cfg.DtdProcessing=[Xml.DtdProcessing]::Prohibit; $cfg.XmlResolver=$null; $cfg.MaxCharactersInDocument=20MB
+    $r=[Xml.XmlReader]::Create($Arquivo,$cfg)
+    try {$x=New-Object Xml.XmlDocument; $x.XmlResolver=$null; $x.Load($r); return ,$x}
+    finally {$r.Dispose()}
+}
+
+function Test-DellPackageOs {
+    param([Xml.XmlElement]$Raiz, [string]$SO, [string]$LegendaSO)
+    $anos=@{W12R2='2012 R2';WST14='2016';WS19L='2019';WS22L='2022';WS25L='2025'}
+    if(-not $anos.ContainsKey($SO)){return $false}
+    $ano=[regex]::Escape($anos[$SO])
+    foreach($os in @($Raiz.SelectNodes('./SupportedOperatingSystems/OperatingSystem'))) {
+        if($os.GetAttribute('osArch') -notin @('x64','x86_64')){continue}
+        $texto=$os.InnerText
+        if($texto -notmatch ('(?i)Windows\s+Server\s+'+$ano+'\b')){continue}
+        # Não presume suporte de outra edição do mesmo Windows Server.
+        $edicao=''
+        if($LegendaSO -match '(?i)\b(Datacenter|Standard|Essentials)\b'){$edicao=$Matches[1]}
+        if($texto -match '(?i)\b(Datacenter|Standard|Essentials)\b') {
+            if(-not $edicao -or $texto -notmatch ('(?i)\b'+[regex]::Escape($edicao)+'\b')){continue}
+        }
+        return $true
+    }
+    return $false
+}
+
+function Test-DellInfDriverVersion {
+    param([string]$Versao)
+    if($Versao -notmatch '^\d+\.\d+\.\d+\.\d+$' -or $null -eq (Compare-DottedVersion $Versao $Versao)){return $false}
+    foreach($parte in ($Versao -split '\.')){$numero=[uint16]0;if(-not [uint16]::TryParse($parte,[ref]$numero) -or $numero -eq 65535){return $false}}
+    return $true
+}
+
+function Get-DellInfDriverVer {
+    param([string]$Linha)
+    if($Linha -notmatch '(?i)^DriverVer\s*=\s*([^,]+),\s*(\d+\.\d+\.\d+\.\d+)\s*$'){return ''}
+    $dataTexto=$Matches[1].Trim();$v=$Matches[2];$data=[datetime]::MinValue
+    if(-not [datetime]::TryParseExact($dataTexto,[string[]]@('MM/dd/yyyy','MM-dd-yyyy'),[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$data) -or -not (Test-DellInfDriverVersion $v)){return ''}
+    return $v
+}
+
+function ConvertFrom-DellInf {
+    param([string]$Texto, [version]$WindowsVersao, [int]$ProductType=3)
+    # Lê somente Version, Manufacturer e Models. Não executa seções de instalação.
+    $secoes=@{}; $atual=''
+    foreach($linhaBruta in ($Texto -split '\r?\n')) {
+        $linha=($linhaBruta -replace '\s*;.*$','').Trim()
+        if($linha -match '^\[([^\]]+)\]$'){$atual=$Matches[1]; if(-not $secoes.ContainsKey($atual)){$secoes[$atual]=New-Object 'System.Collections.Generic.List[string]'}; continue}
+        if($atual -and $linha){$secoes[$atual].Add($linha)}
+    }
+    if(-not $secoes.ContainsKey('Version') -or -not $secoes.ContainsKey('Manufacturer')){return}
+    $versao=''; $classe=''
+    foreach($linha in $secoes.Version) {
+        if($linha -match '(?i)^DriverVer\s*='){$versao=Get-DellInfDriverVer $linha}
+        if($linha -match '(?i)^Class\s*=\s*([A-Za-z0-9_-]+)\s*$'){$classe=$Matches[1]}
+    }
+    if(-not $classe -or -not (Test-DellInfDriverVersion $versao)){return}
+    foreach($linha in $secoes.Manufacturer) {
+        if($linha -notmatch '^[^=]+=\s*([^;]+)$'){continue}
+        $partes=@($Matches[1] -split ',' | ForEach-Object {$_.Trim()})
+        if($partes.Count -lt 2){continue} # Sem arquitetura amd64 explícita: inconclusivo.
+        $opcoes=@()
+        foreach($decoracao in $partes[1..($partes.Count-1)]) {
+            $d=@($decoracao -split '\.')
+            if($d[0] -ine 'NTamd64' -or $d.Count -gt 6){continue}
+            $major=0; $minor=0; $build=0
+            if($d.Count -gt 1){if(-not [int]::TryParse($d[1],[ref]$major)){continue}}
+            if($d.Count -gt 2){if(-not [int]::TryParse($d[2],[ref]$minor)){continue}}
+            if($d.Count -gt 3 -and $d[3] -and $d[3] -ne [string]$ProductType){continue}
+            if($d.Count -gt 4 -and $d[4]){continue} # SuiteMask não comprovado nesta versão.
+            if($d.Count -gt 5 -and $d[5]){if(-not [int]::TryParse($d[5],[ref]$build)){continue}}
+            if([version]("$major.$minor") -gt [version]("$($WindowsVersao.Major).$($WindowsVersao.Minor)")){continue}
+            if($major -eq $WindowsVersao.Major -and $minor -eq $WindowsVersao.Minor -and $build -gt $WindowsVersao.Build){continue}
+            $nome=$partes[0]+'.'+$decoracao
+            if($secoes.ContainsKey($nome)){$opcoes+=[pscustomobject]@{Nome=$nome;Major=$major;Minor=$minor;Build=$build}}
+        }
+        if(-not $opcoes.Count){continue}
+        $escolhida=$opcoes | Sort-Object Major,Minor,Build -Descending | Select-Object -First 1
+        foreach($modelo in $secoes[$escolhida.Nome]) {
+            if($modelo -notmatch '^[^=]+=\s*([^,]+),(.+)$'){continue}
+            $instalar=$Matches[1].Trim();$idsModelo=$Matches[2];$versaoModelo=$versao
+            $decoradaComVersao=@($secoes.Keys | Where-Object {$_.StartsWith($instalar+'.',[StringComparison]::OrdinalIgnoreCase) -and @($secoes[$_] | Where-Object {$_ -match '(?i)^DriverVer\s*='}).Count}).Count
+            if($decoradaComVersao){continue} # Override com decoração DDInstall exige resolução adicional.
+            if($secoes.ContainsKey($instalar)) {
+                foreach($diretiva in $secoes[$instalar]) {
+                    if($diretiva -match '(?i)^DriverVer\s*='){$versaoModelo=Get-DellInfDriverVer $diretiva}
+                }
+            }
+            if(-not (Test-DellInfDriverVersion $versaoModelo)){continue}
+            foreach($id in ($idsModelo -split ',')) {
+                $id=$id.Trim().Trim('"')
+                if($id -match '(?i)^PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})(?:&SUBSYS_([0-9A-F]{4})([0-9A-F]{4}))?(?:&REV_([0-9A-F]{2}))?$') {
+                    [pscustomobject]@{VendorID=$Matches[1];DeviceID=$Matches[2];SubDeviceID=[string]$Matches[3];SubVendorID=[string]$Matches[4];Revisao=[string]$Matches[5];Versao=$versaoModelo;Classe=$classe;Secao=$escolhida.Nome}
+                }
+            }
+        }
+    }
+}
+
+function Get-DellAutomaticPackageMetadata {
+    param([string]$Pasta, $Pacote, $Arquivo, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3)
+    $files=@(Get-DellMetadataFiles $Pasta)
+    $manifestos=@($files | Where-Object Name -ieq 'package.xml')
+    if($manifestos.Count -ne 1){throw 'Extração não contém um único package.xml; formato não reconhecido.'}
+    $xml=Read-DellPackageXml $manifestos[0].FullName
+    $r=$xml.DocumentElement
+    if($r.LocalName -ne 'SoftwareComponent' -or $r.NamespaceURI -or $r.GetAttribute('schemaVersion') -ne '1.0'){throw 'Schema de package.xml não suportado.'}
+    $tipo=$r.SelectSingleNode('./ComponentType')
+    if($null -eq $tipo -or $tipo.GetAttribute('value') -ine $Pacote.Type -or $r.GetAttribute('packageType') -ine $Arquivo.FileType -or
+        $r.GetAttribute('vendorVersion') -cne (([string]$Pacote.DellVer -split ',')[0].Trim()) -or
+        $r.GetAttribute('releaseID') -notmatch ('(?i)^'+[regex]::Escape([string]$Pacote.DriverId))) {throw 'Identidade/tipo/versão do DUP diverge da referência Dell.'}
+    $pcis=@(); $cids=@()
+    foreach($device in @($r.SelectNodes('./SupportedDevices/Device'))) {
+        if($device.GetAttribute('componentID')){$cids+=$device.GetAttribute('componentID')}
+        foreach($pci in @($device.SelectNodes('./PCIInfo'))) {
+            $item=[pscustomobject]@{VendorID=$pci.GetAttribute('vendorID');DeviceID=$pci.GetAttribute('deviceID');SubVendorID=$pci.GetAttribute('subVendorID');SubDeviceID=$pci.GetAttribute('subDeviceID')}
+            $key=Get-PciDeviceKey $item
+            if($key){$pcis+=$key}
+        }
+    }
+    $cids=@($cids | Select-Object -Unique); $pcis=@($pcis | Select-Object -Unique)
+    $coletores=@(); $nome=[string]$Pacote.DriverName
+    foreach($cfg in @($files | Where-Object {$_.Extension -ieq '.xml' -and $_.Length -lt 1MB -and $_.Name -match '(?i)config'})) {
+        try {
+            $c=Read-DellPackageXml $cfg.FullName
+            $cid=$c.SelectSingleNode('/invconfig/componentid')
+            if($null -ne $cid -and $cid.InnerText -match '^\d+$'){$coletores+=$cid.InnerText}
+            $display=$c.SelectSingleNode('/invconfig/displaystring')
+            if($null -ne $display -and $coletores.Count){$nome=$display.InnerText}
+        } catch { Write-Log "Configuração auxiliar não interpretada: $($cfg.Name)." 'AVISO' }
+    }
+    $compativel=Test-DellPackageOs $r $SO $LegendaSO
+    $naoDependeSO=@($r.SelectNodes('./SupportedOperatingSystems/OperatingSystem') | Where-Object {$_.GetAttribute('osCode') -eq 'NAA'}).Count -gt 0
+    $defs=@(); $infFontes=@()
+    if($Pacote.Type -eq 'DRVR' -and $compativel) {
+        foreach($inf in @($files | Where-Object {$_.Extension -ieq '.inf' -and $_.Length -le 5MB})) {
+            $itens=@(ConvertFrom-DellInf -Texto ([IO.File]::ReadAllText($inf.FullName,[Text.Encoding]::Default)) -WindowsVersao $WindowsVersao -ProductType $ProductType)
+            foreach($grupo in @($itens | Group-Object Versao,Classe)) {
+                $perfis=@()
+                foreach($item in $grupo.Group) {
+                    if($item.Revisao){continue} # A engine atual não associa versões distintas por revisão de silício.
+                    foreach($pci in $pcis) {
+                        $ids=$pci -split ':'
+                        if($ids[0] -ieq $item.VendorID -and $ids[1] -ieq $item.DeviceID -and
+                            (-not $item.SubVendorID -or ($ids[2] -ieq $item.SubVendorID -and $ids[3] -ieq $item.SubDeviceID))){$perfis+=$pci}
+                    }
+                }
+                $perfis=@($perfis | Select-Object -Unique)
+                if(-not $perfis.Count){continue}
+                $familias=@($perfis | ForEach-Object {($_ -split ':')[0..1] -join ':'} | Select-Object -Unique)
+                # IDs físicos de SupportedDevices não são necessariamente o ID da
+                # família DRVR. Sem coletor que comprove essa ligação, usa só PCI.
+                $cidDriver=@($coletores | Select-Object -Unique)
+                $defs+=[pscustomobject]@{
+                    Id=('Auto-'+$Pacote.DriverId+'-'+$inf.Name+'-'+$grupo.Group[0].Versao)
+                    ComponentIDs=$cidDriver;NomeInventario=$nome;Classe=$grupo.Group[0].Classe
+                    FamiliasPCI=$familias;PerfisPCI=$perfis;DriverId=[string]$Pacote.DriverId
+                    VersaoFamilia=$r.GetAttribute('vendorVersion');VersaoDriver=$grupo.Group[0].Versao
+                    EspacoVersao='DriverVer/INF';Sistemas=@($SO);Arquivo=[string]$Arquivo.FileName;TipoArquivo=[string]$Arquivo.FileType
+                    Fonte=('package.xml + '+$inf.Name);HashPacote=[string]$Arquivo.SHA256
+                }
+                $infFontes+=[pscustomobject]@{Arquivo=$inf.Name;SHA256=(Get-FileHash -LiteralPath $inf.FullName -Algorithm SHA256).Hash;Versao=$grupo.Group[0].Versao;Classe=$grupo.Group[0].Classe;PerfisPCI=$perfis}
+            }
+        }
+    }
+    # Dois INFs com a mesma versão/classe podem cobrir dispositivos distintos.
+    # Une a cobertura sem escolher arbitrariamente entre arquivos equivalentes.
+    $defs=@(foreach($g in @($defs | Group-Object DriverId,Classe,VersaoFamilia,VersaoDriver,Arquivo)) {
+        $d=$g.Group[0].PSObject.Copy()
+        $d.Id='Auto-'+$d.DriverId+'-'+$d.Classe+'-'+$d.VersaoDriver
+        $d.PerfisPCI=@($g.Group | ForEach-Object {$_.PerfisPCI} | Select-Object -Unique)
+        $d.FamiliasPCI=@($g.Group | ForEach-Object {$_.FamiliasPCI} | Select-Object -Unique)
+        $d.ComponentIDs=@($g.Group | ForEach-Object {$_.ComponentIDs} | Select-Object -Unique)
+        $d.Fonte=(@($g.Group | ForEach-Object {$_.Fonte} | Select-Object -Unique) -join ' | ')
+        $d
+    })
+    $observacao='Metadados extraídos; aplicabilidade ainda depende de identidade e versões equivalentes.'
+    if($Pacote.Type -eq 'DRVR' -and -not $compativel){$observacao='Windows/edição não comprovados no XML do pacote.'}
+    elseif($Pacote.Type -eq 'DRVR' -and -not $defs.Count){$observacao='Não foi encontrado INF exposto e compatível; payloads encapsulados não são executados nem adivinhados.'}
+    return [pscustomobject]@{DriverId=[string]$Pacote.DriverId;Tipo=[string]$Pacote.Type;Versao=$r.GetAttribute('vendorVersion');ComponentIDs=$cids;PerfisPCI=$pcis
+        WindowsConfirmado=$compativel;IndependenteSO=$naoDependeSO;DefinicoesDrivers=@($defs);FontesINF=@($infFontes)
+        Modelos=@($r.SelectNodes('./SupportedSystems//Model') | ForEach-Object {Get-DisplayText $_})
+        SHA256Xml=(Get-FileHash -LiteralPath $manifestos[0].FullName -Algorithm SHA256).Hash
+        SHA256Pacote=[string](Get-ObjectValue $Arquivo 'SHA256');ArquivoDell=[string]$Arquivo.FileName;Observacao=$observacao
+    }
+}
+
+function Get-DellCachedPackageMetadata {
+    param($Pacote, $Arquivo, [string]$Cache, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3,
+        [string]$PastaDiagnostico, [System.Collections.IDictionary]$Estado)
+    if($null -eq $Estado){$Estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}}
+    if(([string](Get-ObjectValue $Arquivo 'SHA256')) -notmatch '^[A-Fa-f0-9]{64}$'){throw 'SHA256 não informado pela referência Dell; pacote não será executado.'}
+    if($Arquivo.FileType -ne 'LW64'){throw 'Análise automática aceita DUP Windows x64 (LW64).'}
+    [void](Get-DellPackageUrl ([string](Get-ObjectValue $Arquivo 'HttpFileLocation')) ([string]$Arquivo.FileName))
+    $raiz=[IO.Path]::GetFullPath($Cache)
+    if($raiz.StartsWith('\\')){throw 'O cache precisa ser local. UNC não é usado para executar pacotes.'}
+    if($raiz.Length -gt 100){throw 'Use um caminho de cache local curto (até 100 caracteres), para compatibilidade com Windows PowerShell 5.1.'}
+    [void][IO.Directory]::CreateDirectory($raiz)
+    if(((Get-Item -LiteralPath $raiz).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Cache não pode ser reparse point.'}
+    $dir=Join-Path $raiz ([string]$Arquivo.SHA256).ToUpperInvariant()
+    [void][IO.Directory]::CreateDirectory($dir)
+    if(((Get-Item -LiteralPath $dir).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Entrada de cache não pode ser reparse point.'}
+    $lock=[IO.File]::Open((Join-Path $dir 'pacote.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    $extraido=Join-Path $dir ('extracao_'+[guid]::NewGuid().ToString('N'))
+    $logs=$extraido+'.logs'
+    $exe=Join-Path $dir 'pacote.exe'; $novo=$null; $guard=$null; $origem='Cache'; $bytes=[int64]0
+    try {
+        $Estado['Origem']='Cache'
+        if(Test-Path -LiteralPath $exe -PathType Leaf) {
+            if(((Get-Item -LiteralPath $exe).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Executável do cache não pode ser reparse point.'}
+            try {[void](Assert-DellPackageFile $exe $Arquivo.SHA256)}
+            catch {Remove-Item -LiteralPath $exe -Force;Write-Log 'Entrada de cache inválida removida; será baixada novamente.' 'AVISO'}
+        }
+        if(-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            $novo=Join-Path $dir ([guid]::NewGuid().ToString('N')+'.download')
+            $Estado['Etapa']='Download';$Estado['Origem']='Download'
+            $bytes=Save-DellPackageDownload $Arquivo $novo -Estado $Estado
+            $Estado['BytesBaixados']=$bytes
+            $Estado['Etapa']='Validação'
+            [void](Assert-DellPackageFile $novo $Arquivo.SHA256)
+            Move-Item -LiteralPath $novo -Destination $exe
+            $origem='Download'
+        }
+        # Mantém o executável bloqueado contra escrita/renomeação durante validação e extração.
+        $guard=[IO.File]::Open($exe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $assinante=Assert-DellPackageFile $exe $Arquivo.SHA256
+        $Estado['Assinante']=$assinante
+        [void][IO.Directory]::CreateDirectory($extraido)
+        $Estado['Etapa']='Extração';$Estado['Diagnostico']=$logs
+        $conteudo=Invoke-DellMetadataExtraction $exe $extraido $Arquivo.SHA256 -PastaLogs $logs
+        $Estado['Etapa']='Metadados'
+        $meta=Get-DellAutomaticPackageMetadata $conteudo $Pacote $Arquivo $SO $LegendaSO $WindowsVersao $ProductType
+        [pscustomobject]@{Metadados=$meta;Origem=$origem;BytesBaixados=$bytes;SHA256=[string]$Arquivo.SHA256;Assinante=$assinante}
+    }
+    finally {
+        try {
+            if($guard){$guard.Dispose()}
+            if($novo -and (Test-Path -LiteralPath $novo)){Remove-Item -LiteralPath $novo -Force}
+            # Preserva somente arquivos conhecidos de diagnóstico, nunca o payload.
+            # O DUP escreve localmente; relatórios em UNC recebem cópias após encerrar.
+            if($PastaDiagnostico -and (Test-Path -LiteralPath $logs -PathType Container)) {
+                try {
+                    [void][IO.Directory]::CreateDirectory($PastaDiagnostico)
+                    $copiados=$true
+                    foreach($nome in @('7zip.stdout.txt','7zip.stderr.txt','7zip.processo.json','dup.stdout.txt','dup.stderr.txt','dup.processo.json','dup.log')) {
+                        $arquivoLog=Join-Path $logs $nome
+                        if(-not (Test-Path -LiteralPath $arquivoLog -PathType Leaf)){continue}
+                        $itemLog=Get-Item -LiteralPath $arquivoLog
+                        if(($itemLog.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $itemLog.Length -gt 20MB){$copiados=$false;continue}
+                        Copy-Item -LiteralPath $arquivoLog -Destination (Join-Path $PastaDiagnostico $nome) -Force
+                    }
+                    if($copiados){$Estado['Diagnostico']=$PastaDiagnostico}
+                    else{Write-Log "Parte dos logs foi mantida no cache: $logs." 'AVISO'}
+                }
+                catch {Write-Log "Não foi possível copiar todos os logs; preservados em $logs. $($_.Exception.Message)" 'AVISO'}
+            }
+            # Remove apenas a extração exclusiva recém-criada, após conferir contenção.
+            $alvo=[IO.Path]::GetFullPath($extraido)
+            $limite=[IO.Path]::GetFullPath($dir).TrimEnd('\')+'\'
+            if($alvo.StartsWith($limite,[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $alvo) -match '^extracao_[0-9a-f]{32}$' -and (Test-Path -LiteralPath $alvo)) {
+                $seguro=$true
+                try {[void]@(Get-DellMetadataFiles $alvo)}catch{$seguro=$false;Write-Log 'Extração com estrutura/limites recusados: limpeza recursiva não foi executada.' 'AVISO'}
+                if($seguro -and ((Get-Item -LiteralPath $alvo).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0){Remove-Item -LiteralPath $alvo -Recurse -Force}
+            }
+        }
+        finally {$lock.Dispose()}
+    }
+}
+
+function Get-DellPackagePriority {
+    param($Pacote, [object[]]$Inventario, [object[]]$Verificacoes)
+    $titulo=[string]$Pacote.DriverName
+    $inconclusivos=@($Verificacoes | Where-Object Status -eq 'Inconclusivo')
+    $prioridade=0; $score=0; $motivo='Ordem geral do inventário.'
+    # Vocabulário de famílias serve apenas para ordenar a investigação. Não
+    # comprova aplicabilidade e não contém fabricante, pacote ou modelo fixo.
+    $familias=@(
+        '(?i)power\s*supply|\bPSU\b|fonte(?:s)?(?:\s+de\s+alimenta[cç][aã]o)?',
+        '(?i)chipset|\bINF\b', '(?i)\bCPLD\b',
+        '(?i)\bSEP\b|backplane|expander|enclosure|gabinete',
+        '(?i)\bBIOS\b', '(?i)\biDRAC\b|remote\s+access',
+        '(?i)\bPERC\b|RAID|controladora',
+        '(?i)ethernet|network|\bNIC\b|rede|NetXtreme|ConnectX',
+        '(?i)\bdisk\b|\bdrive\b|\bdisco\b|\bSSD\b|\bHDD\b'
+    )
+    foreach($i in $Inventario) {
+        $nome=[string]$i.Nome; $cid=[string](Get-ObjectValue $i 'ComponentID')
+        $pendente=@($inconclusivos | Where-Object {
+            ([string](Get-ObjectValue $_ 'TipoDSU') -eq [string]$i.Tipo -or [string]$_.Categoria -eq [string]$i.Tipo) -and
+            (($cid -and $cid -eq [string](Get-ObjectValue $_ 'ComponentID')) -or [string]$_.Componente -eq $nome)
+        }).Count -gt 0
+        $modelo=[string](Get-ObjectValue $i 'ModeloDispositivo')
+        $pontos=0
+        if($modelo.Length -ge 5 -and $titulo.IndexOf($modelo,[StringComparison]::OrdinalIgnoreCase) -ge 0){$pontos+=100}
+        $genericos=@('firmware','driver','drivers','controller','controladora','device','system','power','supply','bayid','version','update','mini','integrated')
+        foreach($token in @($nome -split '[^A-Za-z0-9]+' | Where-Object {$_.Length -ge 5 -and $_ -notin $genericos} | Select-Object -Unique)) {
+            if($titulo -match ('(?i)(?<![A-Za-z0-9])'+[regex]::Escape($token)+'(?![A-Za-z0-9])')){$pontos++}
+        }
+        $score=[Math]::Max($score,$pontos) # Muitas portas iguais não dominam a fila.
+        if(-not $pendente -or [string]$i.Tipo -ne [string]$Pacote.Type){continue}
+        $aproximado=$false
+        foreach($familia in $familias){if($nome -match $familia -and $titulo -match $familia){$aproximado=$true;break}}
+        $nivel=if($pontos -ge 100){3}elseif($pontos -gt 0 -or $aproximado){2}else{0}
+        if($nivel -gt $prioridade){$prioridade=$nivel;$motivo="Investigar componente inconclusivo: $nome. Correspondência textual/família; não comprova aplicabilidade."}
+    }
+    [pscustomobject]@{Prioridade=$prioridade;Score=$score;Motivo=$motivo}
+}
+
+function Get-DellAutomaticMetadata {
+    param([object[]]$Downloads, [object[]]$Inventario, [string]$Cache, [string]$Pasta, [string]$SO, [string]$LegendaSO, [version]$WindowsVersao, [int]$ProductType=3, [int]$Limite=30, [object[]]$Verificacoes=@())
+    $candidatos=@(@(foreach($p in $Downloads) {
+        if($p.Type -notin @('BIOS','FRMW','DRVR')){continue}
+        $f=Get-SiteWindowsPackage $p
+        if($null -eq $f){continue}
+        $ordem=Get-DellPackagePriority $p $Inventario $Verificacoes
+        [pscustomobject]@{Pacote=$p;Arquivo=$f;Prioridade=$ordem.Prioridade;Score=$ordem.Score;Motivo=$ordem.Motivo;Data=(Get-SiteReleaseDate $p);Tamanho=([int64](Get-ObjectValue $f 'FileSize'))}
+    }) | Sort-Object @{Expression='Prioridade';Descending=$true},@{Expression='Score';Descending=$true},@{Expression='Data';Descending=$true},Tamanho)
+    $auditoria=New-Object 'System.Collections.Generic.List[object]'
+    $metadados=New-Object 'System.Collections.Generic.List[object]'
+    $bytes=[int64]0; $reservado=[int64]0; $executados=0; $parcial=$false; $falhasRede=0
+    foreach($c in $candidatos) {
+        $registro=[pscustomobject]@{DriverId=[string]$c.Pacote.DriverId;Pacote=[string]$c.Arquivo.FileName;Status='';Detalhe='';SHA256=[string](Get-ObjectValue $c.Arquivo 'SHA256');Origem='';Assinante='';BytesBaixados=[int64]0;Etapa='';Diagnostico='';Prioridade=$c.Prioridade;MotivoPrioridade=$c.Motivo}
+        $estado=@{BytesBaixados=[int64]0;Origem='';Assinante='';Etapa='Validação';Diagnostico=''}
+        try {
+            $reserva=if($c.Tamanho -gt 0){$c.Tamanho}else{512MB}
+            $bloqueio=if($falhasRede -ge 3){'Análise interrompida após três falhas consecutivas de rede.'}elseif($executados -ge $Limite){'Limite de pacotes por execução.'}elseif($reservado+$reserva -gt 2GB){'Reserva de 2 GiB atingida.'}else{''}
+            if($bloqueio){$registro.Status='Limite';$registro.Detalhe=$bloqueio;$parcial=$true;continue}
+            $reservado+=$reserva
+            $executados++
+            Write-Log "Metadados Dell ($executados/$Limite): $($c.Pacote.DriverId) / $($c.Arquivo.FileName)."
+            $destDiag=''
+            if($Pasta -and [string](Get-ObjectValue $c.Arquivo 'SHA256') -match '^[A-Fa-f0-9]{64}$') {
+                $idSeguro=([string]$c.Pacote.DriverId -replace '[^A-Za-z0-9_-]','_')
+                if($idSeguro.Length -gt 20){$idSeguro=$idSeguro.Substring(0,20)}
+                $destDiag=Join-Path (Join-Path $Pasta 'pacotes') ($idSeguro+'_'+$c.Arquivo.SHA256.Substring(0,12))
+            }
+            $resultado=Get-DellCachedPackageMetadata $c.Pacote $c.Arquivo $Cache $SO $LegendaSO $WindowsVersao $ProductType -PastaDiagnostico $destDiag -Estado $estado
+            if($estado.BytesBaixados -eq 0){$estado.BytesBaixados=$resultado.BytesBaixados}
+            $falhasRede=0
+            $metadados.Add($resultado.Metadados)
+            $registro.Status='Extraido';$registro.Origem=$resultado.Origem
+            if($c.Pacote.Type -eq 'DRVR' -and @($resultado.Metadados.DefinicoesDrivers).Count -eq 0){$registro.Status='ExtraidoParcial';$parcial=$true}
+            $registro.Assinante=$resultado.Assinante
+            $registro.Detalhe="XML validado; $(@($resultado.Metadados.DefinicoesDrivers).Count) referência(s) de driver por INF; assinatura Dell validada. $($resultado.Metadados.Observacao)"
+        }
+        catch {
+            $registro.Status='NaoConcluido';$registro.Detalhe=$_.Exception.Message;$parcial=$true
+            $causa=$_.Exception;$erroRede=$false
+            while($causa){if($causa -is [Net.WebException] -or $causa -is [Net.Sockets.SocketException]){$erroRede=$true;break};$causa=$causa.InnerException}
+            if($erroRede){$falhasRede++}else{$falhasRede=0}
+            Write-Log "Pacote $($registro.DriverId): $($registro.Detalhe)" 'AVISO'
+        }
+        finally {
+            $registro.BytesBaixados=[int64]$estado.BytesBaixados;$bytes+=$registro.BytesBaixados
+            $registro.Etapa=$estado.Etapa;$registro.Diagnostico=$estado.Diagnostico
+            if($estado.Origem){$registro.Origem=$estado.Origem}
+            if($estado.Assinante){$registro.Assinante=$estado.Assinante}
+            $auditoria.Add($registro)
+        }
+    }
+    if($Pasta) {
+        [IO.File]::WriteAllText((Join-Path $Pasta 'pacotes-metadados.json'),(ConvertTo-Json -InputObject ($metadados.ToArray()) -Depth 15),(New-Object Text.UTF8Encoding($true)))
+        [IO.File]::WriteAllLines((Join-Path $Pasta 'pacotes-analise.csv'),[string[]]@($auditoria.ToArray() | ConvertTo-Csv -NoTypeInformation -Delimiter ';'),(New-Object Text.UTF8Encoding($true)))
+    }
+    [pscustomobject]@{Metadados=@($metadados.ToArray());Parcial=$parcial;Examinados=$executados;Candidatos=$candidatos.Count;BytesBaixados=$bytes}
+}
+
+function Merge-DellAutomaticFirmwareRows {
+    param([object[]]$Linhas, [object[]]$Metadados, [object[]]$Downloads, [string]$Modelo)
+    foreach($linha in $Linhas) {
+        $tipo=[string](Get-ObjectValue $linha 'TipoDSU')
+        if(-not $tipo){$tipo=[string]$linha.Categoria}
+        if($tipo -notin @('FRMW','BIOS')){$linha;continue}
+        $matches=@(@(foreach($m in $Metadados) {
+            if($m.Tipo -ine $tipo){continue}
+            $cid=[string](Get-ObjectValue $linha 'ComponentID'); $pci=Get-PciDeviceKey $linha
+            if($cid -and @($m.ComponentIDs).Count -and $cid -notin $m.ComponentIDs){continue}
+            if((-not $cid -or $cid -notin $m.ComponentIDs) -and (-not $pci -or $pci -notin $m.PerfisPCI)){continue}
+            foreach($p in @($Downloads | Where-Object DriverId -eq $m.DriverId)){[pscustomobject]@{Meta=$m;Pacote=$p;Data=(Get-SiteReleaseDate $p)}}
+        }) | Sort-Object Data -Descending)
+        if(-not $matches.Count){$linha;continue}
+        $ultima=$matches[0].Data
+        if($linha.Status -ne 'Inconclusivo') {
+            $dataAnterior=[datetime]::MinValue
+            [void][datetime]::TryParseExact([string]$linha.DataDeLancamento,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$dataAnterior)
+            if($ultima -le $dataAnterior){$linha;continue}
+        }
+        $recentes=@($matches | Where-Object Data -eq $ultima)
+        $versoes=@($recentes | ForEach-Object {$_.Meta.Versao} | Select-Object -Unique)
+        if($ultima -eq [datetime]::MinValue -or $versoes.Count -ne 1){$linha.Status='Inconclusivo';$linha.Motivo='Metadados automáticos encontraram referências ambíguas.';$linha;continue}
+        $m=$recentes[0].Meta; $p=$recentes[0].Pacote
+        $linha.Status='Inconclusivo'
+        $arquivo=Get-SiteWindowsPackage $p
+        $linha.VersaoNova=$m.Versao; $linha.NomeDoPacote=[string]$arquivo.FileName
+        $linha.Criticidade=ConvertTo-CriticalityLabel ([string]$p.Imp)
+        $linha.DataDeLancamento=$ultima.ToString('yyyy-MM-dd')
+        $linha.URL='https://www.dell.com/support/home/pt-br/drivers/driversdetails?driverid='+$p.DriverId
+        $linha.Motivo='Pacote associado automaticamente por ComponentID/PCI; falta comprovar equivalência da versão, SO ou escopo do pacote.'
+        $modeloConfirmado=$true
+        if($tipo -eq 'BIOS' -or @($m.Modelos).Count) {
+            $normal=($Modelo -replace '(?i)Dell|PowerEdge|[^A-Za-z0-9]','').ToLowerInvariant()
+            $modeloConfirmado=@($m.Modelos | Where-Object {(($_ -replace '(?i)Dell|PowerEdge|[^A-Za-z0-9]','').ToLowerInvariant()) -eq $normal}).Count -gt 0
+        }
+        $cmp=Compare-DottedVersion $linha.VersaoAtual $m.Versao
+        if($modeloConfirmado -and @($m.ComponentIDs).Count -eq 1 -and ($m.WindowsConfirmado -or $m.IndependenteSO) -and $null -ne $cmp) {
+            if($cmp -lt 0){$linha.Status='Pendente'}elseif($cmp -eq 0){$linha.Status='Atualizado na referência'}else{$linha.Status='Acima da referência'}
+            $linha.Motivo='Associação automática por identidade de hardware, pacote de um único ComponentID e versão numérica vendorVersion; validar pré-requisitos antes de instalar.'
+        }
+        $linha
+    }
 }
 
 function Assert-CatalogModelCoverage {
@@ -1019,22 +2029,49 @@ try {
         $dadosSite = Get-DellSiteReference -ArquivoSiteDell $ArquivoSiteDell -Produto $produto -SO $so -Pasta $script:Diagnostico -ServiceTag $serviceTag -Consulta $ConsultaSite
         if ($ArquivoInventario) {
             $caminhoInventario = (Get-Item -LiteralPath $ArquivoInventario -ErrorAction Stop).FullName
-            $textoInventario = Read-SharedText -Arquivo $caminhoInventario
-            $inventario = @(Get-ValidatedInventory -Texto $textoInventario -ExigirEncerramento)
-            [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'inventory.importado.txt'), $textoInventario, (New-Object Text.UTF8Encoding($true)))
+            $inventario = @(Import-DsuInventory -Arquivo $caminhoInventario -Pasta $script:Diagnostico)
             Write-Log "Usando inventário já coletado: $caminhoInventario; modificado em $((Get-Item -LiteralPath $caminhoInventario).LastWriteTime.ToString('o'))."
-            Write-Log 'O arquivo importado deve pertencer a este servidor. O texto do DSU não permite comprovar a identidade da máquina de origem.' 'AVISO'
+            Write-Log 'O arquivo importado deve pertencer a este servidor. A importação de texto/XML não comprova a identidade nem a atualidade da máquina de origem.' 'AVISO'
         }
         else {
             $dsu = Find-DsuExecutable $CaminhoDSU
             $ajuda = Invoke-DsuReadOnly $dsu @('--help') 'help' 1
-            if ($ajuda.ExitCode -ne 0 -or $ajuda.Text -notmatch '(?im)(?<![\w-])--inventory(?=[\s=,\[\]<>;:]|$)') { throw 'A ajuda do DSU não confirmou a opção --inventory. Consulte help.stdout.txt.' }
-            $inventarioBruto = Invoke-DsuReadOnly $dsu @('--inventory') 'inventory' $TempoLimiteDSUMinutos
-            if ($inventarioBruto.ExitCode -ne 0) { throw "Inventário DSU falhou (código $($inventarioBruto.ExitCode)). Consulte os arquivos brutos." }
-            $inventario = @(Get-ValidatedInventory -Texto $inventarioBruto.Text)
+            if ($ajuda.ExitCode -ne 0) { throw "Ajuda do DSU falhou (código $($ajuda.ExitCode))." }
+            $inventario = @(Get-DsuSiteInventory -Executavel $dsu -Ajuda $ajuda.Text -Pasta $script:Diagnostico -LimiteMinutos $TempoLimiteDSUMinutos)
         }
+        $driversWindows = @()
+        try {
+            $driversWindows = @(Get-DellWindowsNetworkDrivers)
+            Write-Log "Drivers de dispositivos PCI coletados: $($driversWindows.Count). A comparação exige metadados de pacote Dell; sem Windows Update."
+        }
+        catch { Write-Log "Não foi possível obter drivers de rede pelo CIM: $($_.Exception.Message). Os casos sem evidência permanecem inconclusivos." 'AVISO' }
+        [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'drivers-windows.json'), (ConvertTo-Json -InputObject @($driversWindows) -Depth 5), (New-Object Text.UTF8Encoding($true)))
+        [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'inventory.normalizado.json'), (ConvertTo-Json -InputObject @($inventario) -Depth 5), (New-Object Text.UTF8Encoding($true)))
         Write-Log "Inventário interpretado: $($inventario.Count) componentes. Comparando com os downloads do site."
-        $verificacoes = @(New-SiteAssessmentRows -Inventario $inventario -Downloads $dadosSite.DriverListData -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo -SO $so)
+        $defs=@(Get-DellDriverDefinitions)
+        $verificacoes = @(New-SiteAssessmentRows -Inventario $inventario -Downloads $dadosSite.DriverListData -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo -SO $so -DriversWindows $driversWindows -MetadadosDrivers $defs)
+        if($AnalisePacotes -eq 'Automatica') {
+            if(-not $CaminhoCachePacotes){$CaminhoCachePacotes=Join-Path $env:ProgramData 'RelatorioDell\CachePacotes'}
+            $CaminhoCachePacotes=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CaminhoCachePacotes)
+            Write-Log "Análise automática de DUPs: cache=$CaminhoCachePacotes; máximo=$LimitePacotes pacotes. Não aplica atualizações."
+            $auto=Get-DellAutomaticMetadata -Downloads $dadosSite.DriverListData -Inventario $inventario -Cache $CaminhoCachePacotes -Pasta $script:Diagnostico -SO $so -LegendaSO ([string]$sistemaOperacional.Caption) -WindowsVersao ([version]$sistemaOperacional.Version) -ProductType $sistemaOperacional.ProductType -Limite $LimitePacotes -Verificacoes $verificacoes
+            $novas=@(foreach($meta in $auto.Metadados){foreach($def in $meta.DefinicoesDrivers){$def}})
+            if($novas.Count) {
+                # INF do próprio pacote substitui a referência incorporada daquela versão.
+                $idsAuto=@($novas | ForEach-Object {$_.DriverId} | Select-Object -Unique)
+                $defs=@($defs | Where-Object {$_.DriverId -notin $idsAuto})+@($novas)
+                $verificacoes=@(New-SiteAssessmentRows -Inventario $inventario -Downloads $dadosSite.DriverListData -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo -SO $so -DriversWindows $driversWindows -MetadadosDrivers $defs)
+            }
+            $verificacoes=@(Merge-DellAutomaticFirmwareRows -Linhas $verificacoes -Metadados $auto.Metadados -Downloads $dadosSite.DriverListData -Modelo $modelo)
+            if($auto.Parcial) {
+                Write-Log 'Análise de pacotes parcial: consulte pacotes-analise.csv. Downloads recusados/limitados não comprovam ausência de atualizações.' 'AVISO'
+                if(@($verificacoes | Where-Object Status -eq 'Inconclusivo').Count -eq 0) {
+                    $verificacoes+=[pscustomobject]@{Hostname=$hostnameLocal;ServiceTag=$serviceTag;Modelo=$modelo;Componente='Análise automática de pacotes incompleta';Categoria='Verificação';VersaoAtual='';VersaoNova='';Criticidade='';DataDeLancamento='';NomeDoPacote='';Status='Inconclusivo';Motivo='Houve limite ou falha na análise de pacotes; consulte pacotes-analise.csv.';URL=''}
+                }
+            }
+            Write-Log "Pacotes examinados: $($auto.Examinados)/$($auto.Candidatos); bytes baixados nesta análise: $($auto.BytesBaixados)."
+            [IO.File]::WriteAllText((Join-Path $script:Diagnostico 'drivers-referencias.json'),(ConvertTo-Json -InputObject @($defs) -Depth 15),(New-Object Text.UTF8Encoding($true)))
+        }
         $csv = Join-Path $CaminhoSaida ($prefixo + '.csv')
         Export-SiteAssessment -Verificacoes $verificacoes -Arquivo $csv -Hostname $hostnameLocal -ServiceTag $serviceTag -Modelo $modelo
         Write-Log "CSV gerado: $csv"

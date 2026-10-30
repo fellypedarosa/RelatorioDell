@@ -1,0 +1,60 @@
+{
+    "Data":  "2026-10-29",
+    "Metodo":  "Download HTTPS oficial; SHA256 conferido com a pagina Dell; Authenticode Valid, Dell Inc.; extracao estatica com 7-Zip. Nenhum DUP, payload, VBS ou instalador foi executado.",
+    "Firmware":  {
+                     "DriverId":  "DFF48",
+                     "URL":  "https://downloads.dell.com/FOLDER08077841M/1/Network_Firmware_DFF48_WN64_22.00.6.EXE",
+                     "SHA256":  "AC496387763C479622CDC9537B78F07F27ABB51CCC1B9000D5FE5D1C99098334",
+                     "PerfisPCI":  [
+                                       "14E4:165F:14E4:2003",
+                                       "14E4:165F:1028:0639"
+                                   ],
+                     "FFV":  "22.00.6",
+                     "FonteVersao":  "package.xml + coluna family de bcmnxfw.cfg",
+                     "ObservacaoSO":  "Pagina Dell e notas listam Windows 2019/2022, sem 2016; pendencia de firmware nao valida execucao do DUP em Windows 2016."
+                 },
+    "Driver":  {
+                   "DriverId":  "49X84",
+                   "URL":  "https://downloads.dell.com/FOLDER07078720M/2/Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+                   "SHA256":  "6B767E913579FD28E9947514EB75C0EDF53EA11989DFE833EB3ED08722C92218",
+                   "VersaoFamilia":  "21.80.3",
+                   "VersaoSuite":  "218.0.169.2",
+                   "VersaoNDIS":  "214.0.0.6",
+                   "VersaoNDISFonte":  "https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt",
+                   "WindowsValidadosNoCodigo":  [
+                                                    "WST14",
+                                                    "WS19L"
+                                                ],
+                   "InventarioDellComponentID":  "8641",
+                   "DefaultSemVersao":  "0.0.0",
+                   "RegistroConsultadoPeloColetorDell":  "HKLM\\SOFTWARE\\Dell\\MUP\\Broadcom\\UInstaller\\Product_Version",
+                   "Observacao":  "A origem do zero foi identificada no nxUDUPconfig.xml/BcomInv.vbs do pacote, nao foi verificada no Registro do servidor do cliente. Versoes CIM reais do servidor ainda nao recebidas."
+               },
+    "ArquivosExtraidos":  [
+                              {
+                                  "Arquivo":  "firmware/package.xml",
+                                  "SHA256":  "F54FEBB0536E816DE9BD7ABA444D7F80437C62A9A52A6B07194F7179CC29F3E0"
+                              },
+                              {
+                                  "Arquivo":  "firmware/bcmnxfw.cfg",
+                                  "SHA256":  "7EC1FDE1A22E5D3BF85B61F848EDF92B94EF8BD18A85444B78A270A5474C9978"
+                              },
+                              {
+                                  "Arquivo":  "driver/package.xml",
+                                  "SHA256":  "94440384A7EBAF00DD7351F7D6FB69BD3252ECB5C1E986FBE4A0302D9B5D149C"
+                              },
+                              {
+                                  "Arquivo":  "driver/nxUDUPconfig.xml",
+                                  "SHA256":  "0E3375B700532CB601E022EED8AF6A426E2CE7AEB33768FE5EADFA1DFE353028"
+                              },
+                              {
+                                  "Arquivo":  "driver/BcomInv.vbs",
+                                  "SHA256":  "1F459219750A707261BF21A3A557F1CE232CD32005DEFD18E9DFDB9233075D23"
+                              },
+                              {
+                                  "Arquivo":  "driver-release.txt",
+                                  "SHA256":  "3CED936A4B17F5D37F26E4CC84855AE27F186317F0F70FC4B24A37C5D181F801"
+                              }
+                          ],
+    "Limites":  "Recorte factual de metadados oficiais, nao certificacao de aplicabilidade ou combinacao firmware/driver. A implementacao so utiliza os pacotes presentes na referencia selecionada."
+}

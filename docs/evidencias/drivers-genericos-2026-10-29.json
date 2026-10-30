@@ -1,0 +1,88 @@
+{
+    "Data":  "2026-10-29",
+    "Objetivo":  "Separar engine de comparacao e dados de pacote, independente de modelo PowerEdge, Service Tag, hostname, provedor instalado ou quantidade de interfaces.",
+    "ProvenienciaAnterior":  "broadcom-2026-10-29.json",
+    "FontePacote":  "https://downloads.dell.com/FOLDER07078720M/2/Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+    "SHA256Pacote":  "6B767E913579FD28E9947514EB75C0EDF53EA11989DFE833EB3ED08722C92218",
+    "MetodoSelecaoPCI":  "Intersecao das tuplas SupportedDevices/Device/PCIInfo do package.xml com as familias vendorid/deviceid de supporteddevices do nxUDUPconfig.xml. Nao inclui outros dispositivos apenas por constarem na lista ampla do package.xml.",
+    "QuantidadePerfis":  33,
+    "FamiliasPCI":  [
+                        "14E4:1657",
+                        "14E4:165F"
+                    ],
+    "MetadadoIncorporado":  {
+                                "Id":  "Dell-49X84-NDIS",
+                                "ComponentIDs":  [
+                                                     "8641"
+                                                 ],
+                                "NomeInventario":  "Broadcom NetXtreme Driver Family",
+                                "Classe":  "NET",
+                                "FamiliasPCI":  [
+                                                    "14E4:1657",
+                                                    "14E4:165F"
+                                                ],
+                                "PerfisPCI":  [
+                                                  "14E4:165F:14E4:2003",
+                                                  "14E4:1657:14E4:1904",
+                                                  "14E4:165F:1028:1F5B",
+                                                  "14E4:1657:14E4:1905",
+                                                  "14E4:165F:1028:04F6",
+                                                  "14E4:165F:1028:04F7",
+                                                  "14E4:165F:1028:04F8",
+                                                  "14E4:165F:1028:04F9",
+                                                  "14E4:165F:1028:04FA",
+                                                  "14E4:165F:1028:04DC",
+                                                  "14E4:165F:1028:05E5",
+                                                  "14E4:165F:1028:1F54",
+                                                  "14E4:165F:1028:0639",
+                                                  "14E4:165F:1028:063B",
+                                                  "14E4:165F:1028:06A5",
+                                                  "14E4:165F:1028:06A6",
+                                                  "14E4:165F:1028:06A7",
+                                                  "14E4:165F:1028:001F",
+                                                  "14E4:165F:1028:000A",
+                                                  "14E4:165F:14E4:4120",
+                                                  "14E4:165F:14E4:4160",
+                                                  "14E4:165F:1028:07F7",
+                                                  "14E4:165F:1028:088E",
+                                                  "14E4:165F:1028:0890",
+                                                  "14E4:165F:1028:088F",
+                                                  "14E4:165F:1028:0891",
+                                                  "14E4:165F:1028:1FEC",
+                                                  "14E4:165F:14E4:2018",
+                                                  "14E4:165F:1028:08FD",
+                                                  "14E4:165F:1028:0900",
+                                                  "14E4:165F:1028:08FF",
+                                                  "14E4:165F:1028:0917",
+                                                  "14E4:165F:1028:0A17"
+                                              ],
+                                "DriverId":  "49X84",
+                                "VersaoFamilia":  "21.80.3",
+                                "VersaoDriver":  "214.0.0.6",
+                                "EspacoVersao":  "NDIS",
+                                "Sistemas":  [
+                                                 "WST14",
+                                                 "WS19L"
+                                             ],
+                                "Arquivo":  "Network_Driver_49X84_WN64_21.80.3_218.0.169.2_01.EXE",
+                                "TipoArquivo":  "LW64",
+                                "Fonte":  "https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt"
+                            },
+    "Assinatura":  "IsSigned do CIM local; nao e uma verificacao propria de cada arquivo do driver.",
+    "Provedor":  "Informativo; Microsoft e outros provedores nao sao recusados por nome quando hardware, assinatura, SO e versao atendem os criterios.",
+    "ColetaRealRevisada":  {
+                               "Quantidade":  6,
+                               "Versao":  "17.2.1.0",
+                               "Provedor":  "Microsoft",
+                               "InfName":  "netb57va.inf",
+                               "AssinadoCIM":  true,
+                               "IdentificadoresDeInstancia":  "Omitidos; fixture usa EXEMPLO1 a EXEMPLO6."
+                           },
+    "ResultadoLocal":  {
+                           "Pendentes":  12,
+                           "AtualizadosNaReferencia":  2,
+                           "Inconclusivos":  5,
+                           "Metodo":  "Reprocessamento offline de inventario, downloads e evidencia CIM reais fornecidos pelo operador; nenhum DUP executado."
+                       },
+    "Limites":  "Base inicial de drivers: somente 49X84, Windows 2016/2019 e espaco NDIS. Novo pacote/fabricante exige metadados e versao equivalente revisados. Testes com outros modelos/fabricantes sao sinteticos, nao validacao fisica nesses servidores. Mantida ressalva de execucao do DFF48 em Windows 2016."
+}

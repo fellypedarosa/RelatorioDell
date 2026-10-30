@@ -2,13 +2,17 @@
 
 Script PowerShell para apoiar a análise de atualizações em servidores Dell PowerEdge com Windows Server. Compara versões instaladas com uma referência Dell e gera CSV, log e arquivos de diagnóstico. **Não instala atualizações nem reinicia o servidor.**
 
+**Escopo:** BIOS, firmwares e drivers de hardware disponibilizados no suporte Dell. Isso inclui componentes de fabricantes como Broadcom e Intel; o driver não precisa ter autoria da Dell para fazer parte do hardware do PowerEdge. Patches do Windows, atualizações cumulativas e aplicativos ficam com o **Endpoint Central**. O script não consulta Windows Update. O CIM lê dados locais de drivers de dispositivos PCI; somente uma referência Dell validada permite classificá-las como pendentes.
+
 ## Resumo: como ele pesquisa em cada servidor
 
 Você executa o mesmo script em cada servidor. **Ele identifica automaticamente a Service Tag, o modelo e o Windows Server instalado**, normalmente sem precisar preencher ou editar essas informações.
 
 1. Identifica a Service Tag, o modelo e o Windows Server da própria máquina.
 2. Consulta os downloads Dell pelo **modelo e sistema operacional instalado**, ou lê um HAR salvo manualmente do navegador com `-ArquivoSiteDell`. A Service Tag identifica o servidor no relatório, mas não é enviada na consulta automática padrão.
-3. Coleta ou carrega o inventário do DSU, compara as versões e gera o relatório de pendências identificadas, sinalizando os casos inconclusivos.
+3. Coleta ou carrega o inventário do DSU e lê os drivers PCI locais pelo CIM.
+4. Por padrão, baixa e valida pacotes Dell candidatos, extrai seus metadados e tenta descobrir automaticamente a correspondência entre hardware e versão. Mantém as referências incorporadas quando não há uma substituição automática comprovada.
+5. Compara as versões e gera o relatório de pendências identificadas, sinalizando os casos inconclusivos.
 
 O modelo é identificado automaticamente e validado na resposta. Exemplos:
 
@@ -26,13 +30,13 @@ O modelo é identificado automaticamente e validado na resposta. Exemplos:
 
 Os detalhes técnicos, as regras de comparação e suas limitações estão nas seções seguintes. A [pesquisa de alternativas para consulta por Service Tag](docs/Pesquisa-ServiceTag.md) avalia coleta no navegador, APIs, ferramentas Dell e uma proposta de validação, sem presumir que o bloqueio HTTP tenha sido resolvido.
 
-**Alcance atual:** no modo padrão, as regras de comparação identificam BIOS, iDRAC, firmware de controladoras PERC com modelo reconhecido e CPLD quando há referência inequívoca. Outros componentes são registrados como **inconclusivos**. O resultado é um relatório auxiliar; não certifica que todos os componentes do servidor estejam atualizados.
+**Alcance atual:** as referências incorporadas identificam BIOS, iDRAC, firmware PERC e CPLD quando há referência inequívoca, além dos discos e perfis Broadcom documentados adiante. A análise automática pode acrescentar outros drivers PCI e firmwares a partir dos metadados dos próprios pacotes, sem uma regra por modelo de servidor. Componentes sem identidade ou versão comprovadas continuam **inconclusivos**. O relatório não certifica que todo o servidor esteja atualizado.
 
 Este é um script próprio. As fontes de downloads e os comandos do DSU são da Dell; as regras de associação e comparação deste projeto não são uma engine de aplicabilidade fornecida ou certificada pela Dell.
 
 ## 1. Executar no servidor
 
-Requisitos: Windows PowerShell **5.1**, sessão de **administrador** e **Dell System Update (DSU)** instalado para uma coleta nova. A consulta automática exige acesso HTTPS à Dell; a alternativa com `-ArquivoSiteDell` lê localmente a referência salva no navegador. O próprio DSU pode precisar de rede para coletar o inventário. A [documentação Dell do DSU][dsu] descreve a ferramenta e seus requisitos; a compatibilidade do DSU deve ser conferida para o modelo e o Windows Server usados.
+Requisitos: Windows PowerShell **5.1**, sessão de **administrador** e **Dell System Update (DSU)** instalado para uma coleta nova. A lista pode vir da Dell ou do HAR local. A análise automática de pacotes exige acesso HTTPS para downloads; para usar apenas HAR/XML e referências incorporadas, informe `-AnalisePacotes Desativada`. O próprio DSU pode precisar de rede para coletar o inventário. A [documentação Dell do DSU][dsu] descreve a ferramenta e seus requisitos; a compatibilidade do DSU deve ser conferida para o modelo e o Windows Server usados.
 
 Copie apenas `Gerar-RelatorioDell.ps1` para uma pasta local do servidor, abra o Windows PowerShell como administrador, entre nessa pasta e execute:
 
@@ -50,13 +54,25 @@ Para escolher uma pasta local ou UNC:
 .\Gerar-RelatorioDell.ps1 -CaminhoSaida '\\ARQUIVOS\Relatorios\ClienteA'
 ```
 
-Para reaproveitar um inventário já coletado **neste mesmo servidor**:
+Para reaproveitar o XML já coletado **neste mesmo servidor**, inclusive junto com os downloads do HAR:
 
 ```powershell
-.\Gerar-RelatorioDell.ps1 -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+.\Gerar-RelatorioDell.ps1 -ArquivoInventario '.\InventarioDell.xml'
+
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml'
 ```
 
-O arquivo importado precisa conter a mensagem `Exiting DSU!`. A validação atual verifica a presença dessa mensagem e a interpretação das linhas numeradas; não comprova a identidade da máquina nem a atualidade da coleta. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
+**Prefira XML:** ele preserva modelos de discos físicos atrás da PERC, baias/FQDD, Component IDs e PCI IDs que podem não aparecer no resumo textual. O parâmetro detecta XML `SVMInventory` com `schemaVersion="1.0"` e continua aceitando o texto antigo. O XML precisa estar completo, com dispositivos e suas aplicações/versões; não exige `Exiting DSU!`. O texto importado continua exigindo essa mensagem e linhas numeradas reconhecidas. Arquivos acima de 10 MiB, XML inválido ou com DTD são recusados.
+
+A importação **não comprova a identidade da máquina nem a atualidade da coleta**: use somente inventário deste servidor. O caminho e a data de modificação são registrados no log. Administrador continua sendo exigido também nesta modalidade.
+
+Sem `-ArquivoInventario`, a coleta prefere automaticamente o XML quando a ajuda do DSU anuncia a opção. Para gerar um XML separadamente, confira primeiro `DSU.exe --help` e execute o comando de inventário:
+
+```powershell
+& 'C:\Program Files\Dell\DELL EMC System Update\DSU.exe' --inventory "--output-inventory-xml=$env:TEMP\InventarioDell.xml"
+```
+
+A Dell documenta essa exportação no [manual do DSU 1.9.2.0][xml-dsu]. O formato aceito foi conferido também no XML real fornecido em 29/10/2026. Não é necessário atualizar o DSU apenas para tentar essa opção; confira a compatibilidade de qualquer nova versão com o Windows Server e o PowerEdge antes de instalá-la.
 
 ### Alternativa manual: downloads salvos do navegador
 
@@ -69,12 +85,83 @@ Exporte o HAR conforme o [guia de captura](docs/Importacao-Manual-Dell.md), copi
 Para reutilizar também o inventário já concluído deste servidor:
 
 ```powershell
-.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.txt"
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell 'C:\Dell\DownloadsDell.har' -ArquivoInventario "$env:TEMP\InventarioDell.xml"
 ```
 
 O script identifica produto e SO da captura, confere sua correspondência com o servidor e lê os metadados dos downloads. O modo padrão continua sendo **Modelo**: usa a lista ampla do modelo, mesmo se a resposta tiver sido obtida por um endpoint de tag. Abrir uma página pela tag não comprova que todos os registros listados sejam aplicáveis ao hardware atual. Na imagem usada como referência, a aba **All PowerEdge R530** indica a lista ampla; o Windows Server 2012 R2 selecionado ali deve ser trocado se o servidor executar Windows Server 2016.
 
-Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O HAR deve conter a resposta de downloads; o script rejeita ausência de corpo, contexto errado, lista vazia, dados inválidos ou respostas ambíguas. Esse fluxo não refaz a consulta HTTP. Um HAR inválido não causa uma tentativa automática de consultar outra fonte.
+Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O HAR deve conter a resposta de downloads; o script rejeita ausência de corpo, contexto errado, lista vazia, dados inválidos ou respostas ambíguas. A importação não refaz a consulta HTTP da lista; a fase seguinte pode baixar pacotes conforme descrito abaixo. Um HAR inválido não causa uma tentativa automática de consultar outra fonte.
+
+### Análise automática dos pacotes Dell
+
+**Ativa por padrão em `-Fonte Site` (`-AnalisePacotes Automatica`).** Você continua fornecendo o HAR e executando o mesmo script. Ele usa os links e hashes SHA256 dos arquivos presentes nessa resposta para obter metadados que não estão na tabela de downloads. Não é necessário cadastrar uma regra por fabricante para cada pacote cujo formato seja reconhecido.
+
+#### Em linguagem simples: como escolhe e baixa os pacotes
+
+**Inconclusivo é um componente instalado cuja situação ainda não pôde ser confirmada.** Não significa necessariamente que o modelo do servidor não foi encontrado no site Dell.
+
+1. **De onde vêm os candidatos?** Da lista de downloads Dell para o modelo e Windows do servidor. Ela é obtida pela consulta online ou lida do HAR que você entrega. Essa lista já contém nomes, tipos, versões, datas, links dos arquivos e hashes SHA256; o script não inventa endereços de download.
+2. **Como escolhe o que investigar?** Separa BIOS, firmwares e drivers com pacote Windows. Prioriza os candidatos que parecem relacionados aos componentes inconclusivos, usando modelo físico, termos do nome e famílias como fonte/PSU, chipset e controladora. Considera correspondência, data e tamanho. Por padrão, examina até **30 pacotes** por execução.
+3. **Como baixa?** Faz o download direto por HTTPS dos repositórios oficiais `downloads.dell.com`/`dl.dell.com`, sem abrir o navegador. Se o arquivo já estiver no cache, reutiliza-o. Antes de extrair, confere novamente SHA256 e assinatura digital Dell.
+4. **Como confirma que o pacote corresponde ao componente?** Extrai os metadados e cruza os identificadores de hardware e o Windows atendido com o inventário local. Para drivers com INF utilizável, obtém a versão real do driver e a compara com a informada pelo CIM. Para firmware, aplica os critérios de identidade e comparação descritos abaixo.
+5. **Qual é o resultado?** Com evidência suficiente, classifica como pendente, atualizado na referência ou acima da referência. Se faltar informação, houver ambiguidade ou a extração falhar, mantém inconclusivo.
+
+**Escolher um candidato para baixar é uma pista para investigação, não uma confirmação de que ele serve.** Baixar e extrair também não garante resolver um inconclusivo. O script não instala as atualizações.
+
+Exemplo validado no servidor de teste: o pacote **T244W** expôs XML e INF compatíveis com a identidade PCI da PERC H730P Mini. O CIM informou o driver instalado **6.603.6.0**, e o INF do pacote informou **6.604.06.00**. A análise automática identificou essa pendência sem cadastrar uma regra específica para T244W; o resultado passou de 12 para 13 pendências, mantendo cinco inconclusivos.
+
+Os parâmetros e os detalhes técnicos dessa investigação estão a seguir.
+
+```powershell
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml'
+
+# Cache opcional em outra pasta LOCAL; a saída dos relatórios continua aceitando UNC.
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -CaminhoCachePacotes 'C:\DellCache' -LimitePacotes 30
+
+# Sem download/extração de pacotes: utiliza somente referências incorporadas.
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml' -AnalisePacotes Desativada
+```
+
+O cache padrão é **`%ProgramData%\RelatorioDell\CachePacotes`**, criado automaticamente. O primeiro uso pode demorar e ocupar espaço. O cache guarda os executáveis por SHA256. Em cada análise eles são validados e extraídos novamente: o script não confia em metadados antigos editáveis. O cache não pode ser UNC, reparse point ou caminho com mais de 100 caracteres, para compatibilidade com PowerShell 5.1. Pode ser removido manualmente quando não estiver em uso; será reconstruído.
+
+#### Como o script obtém e usa os metadados
+
+1. **Seleciona candidatos:** mantém BIOS, firmware e drivers com DUP Windows. Usa a primeira comparação para investigar antes os componentes **inconclusivos**, por modelo físico ou termos/famílias do componente. Reconhece vocabulário como `Power Supply`/`PSU`/fonte, chipset, SEP/backplane, CPLD, BIOS, iDRAC, controladoras, rede e discos. Não contém uma lista de fabricantes ou pacotes favorecidos. Ignora termos genéricos como `firmware`, e muitas portas iguais não aumentam artificialmente o peso. Dentro da prioridade, considera correspondência, data mais recente e tamanho. Essa ordem só prioriza a investigação; nomes parecidos não autorizam uma pendência.
+2. **Confere a origem:** aceita somente HTTPS de `downloads.dell.com`/`dl.dell.com`, porta padrão e nome exato do arquivo, sem credenciais, query ou fragmento. O alias `dl` é normalizado para `downloads`; redirecionamentos não são seguidos. O HAR passa a preservar URL validada, SHA256 e tamanho, sem copiar cookies ou a navegação completa.
+3. **Valida o arquivo:** exige SHA256 igual à referência e Authenticode `Valid`, com identidade Dell Inc./Dell Technologies Inc. Não desabilita certificados. Link, hash ou assinatura ausentes/inválidos impedem a extração. O cache também é revalidado; um binário adulterado é descartado para novo download.
+4. **Extrai sem instalar:** prefere o 7-Zip já instalado em `Program Files`, sem baixá-lo. Usa a linha básica `x -y -o"<pasta>" "<pacote>"`, sem opções `-bs*` de controle de saída; stdout/stderr já são capturados em arquivo. Isso reduz dependências de sintaxe entre versões e preserva as mensagens reais do extrator. Se ele não expuser o manifesto, ou estiver ausente, usa **somente** a extração documentada do DUP: `/s /e="<pasta>" /l="<log>"`. As opções ficam sem aspas; os valores dos caminhos são citados. Cada extrator recebe uma pasta vazia exclusiva, e o log fica **fora** dela. A Dell informa que não extrai para uma pasta com conteúdo. A leitura usa somente a tentativa que teve sucesso, sem misturar resíduos do 7-Zip. Essa alternativa inicia o executável Dell validado em modo de extração e exige administrador. Nunca usa `/s` isolado, `/f`, `/r` ou instaladores internos. Consulte as [opções Windows do DUP][dup-cli].
+5. **Lê `package.xml`:** exige `SoftwareComponent`, schema `1.0`, identidade/releaseID, tipo, formato e versão coerentes com a referência. Lê ComponentIDs, tuplas PCI, sistemas e SOs atendidos. XML com DTD, schema desconhecido ou manifesto ambíguo é recusado.
+6. **Descobre a versão do driver:** quando há INF exposto, lê `DriverVer`, `Class`, `Manufacturer` e `Models`. Escolhe arquitetura amd64 e decoração compatível com versão/build e ProductType do Windows. Cruza os IDs do INF com os do manifesto; não usa IDs de seções arbitrárias. Compara o `DriverVer` com o CIM, **não a versão da suíte**. Referências Microsoft: [DriverVer][inf-driverver], [Manufacturer/TargetOSVersion][inf-manufacturer] e [Models][inf-models].
+7. **Compara e registra:** as referências derivadas alimentam a engine por dispositivo. Exige identidade, versão válida, assinatura indicada pelo CIM e cobertura das instâncias; versões distintas geram grupos separados. Provedor Microsoft não bloqueia sozinho a análise. Firmware pode receber comparação numérica automática quando o pacote tem um único ComponentID, hardware/modelo e SO comprovados. Uma referência mais nova interpretada não mantém o firmware confirmado apenas pela referência antiga.
+
+A lógica continua independente do modelo de PowerEdge. Os metadados incorporados, como 49X84, permanecem como referências já verificadas quando a extração não expõe uma versão equivalente. Um INF do próprio pacote pode substituí-los naquela versão. `drivers-referencias.json` registra os dados efetivamente usados.
+
+#### Limites e significado de inconclusivo
+
+| Condição | Comportamento |
+| --- | --- |
+| Não é DUP x64 (`LW64`), URL/hash ausentes ou assinatura não confirmada | Não executa o pacote; registra o motivo. |
+| INF dentro de instalador/MSI/CAB/ZIP interno ou formato desconhecido | Não executa o payload nem adivinha a versão. Esta versão lê INFs expostos pela extração do DUP; não extrai recursivamente instaladores internos. |
+| Revisão de silício obrigatória, SuiteMask ou override `DriverVer` em DDInstall decorado | Não amplia suporte por suposição. Overrides DDInstall simples são respeitados; casos não resolvidos ficam sem referência automática. |
+| Firmware alfanumérico ou pacote com múltiplos ComponentIDs | Pode identificar o pacote, mas não faz comparação numérica automática. As regras específicas anteriores mantêm sua cobertura documentada. |
+| SO/edição não comprovados, hardware divergente ou referência ambígua | Mantém inconclusivo. Para BIOS, ComponentID igual sozinho não basta: exige modelo atendido. |
+| Compatibilidade global de instalação | Não reproduz o ranking completo do Windows nem valida estado do RAID, pré-requisitos e combinação firmware/driver. O modo `/c` do DUP existe, mas **não é executado por esta funcionalidade** nem usado como prova isolada de versão pendente. |
+
+Limites: **30 pacotes por execução**, ajustáveis com `-LimitePacotes`; reserva conservadora de **2 GiB** de arquivos examinados (também pode contar o cache); **512 MiB por download**, até **120 segundos** de transferência; até **3 minutos** para extrair cada pacote. Há avisos periódicos de progresso. Três falhas consecutivas de rede interrompem novas tentativas. A árvore extraída é conferida contra reparse points, 10000 entradas e 2 GiB **após** a extração; isso não é uma quota do sistema de arquivos.
+
+Limites, bloqueios HTTP e extrações parciais **não significam “sem atualizações”**. Cada candidato aparece em `pacotes-analise.csv`. Se a etapa ficar parcial e não houver outro inconclusivo, o relatório acrescenta um aviso de análise incompleta, impedindo “Nenhuma atualização pendente”. Esse aviso é da coleta, não um componente físico novo. Não há garantia de eliminar todos os inconclusivos.
+
+#### Arquivos para auditoria
+
+- `pacotes-analise.csv`: DriverId, arquivo, SHA256, origem cache/download, thumbprint do assinante, situação e motivo. Inclui `Etapa`, `Diagnostico`, `Prioridade`, `MotivoPrioridade` e `BytesBaixados`. A explicação de limite distingue quantidade, reserva de bytes e interrupção por rede.
+- `pacotes-metadados.json`: ComponentIDs/PCI, versão do pacote, compatibilidade observada e referências dos INFs, com hashes do manifesto e dos INFs.
+- `drivers-referencias.json`: referências incorporadas/automáticas efetivamente usadas.
+- `_Verificacao.csv`: identidade, origem da versão e motivo de cada resultado; `TipoDSU` preserva o tipo original.
+- `pacotes\<DriverId>_<SHA256 inicial>\`: preserva `7zip.processo.json`/`dup.processo.json`, os respectivos `.stdout.txt`/`.stderr.txt` e `dup.log`, conforme os extratores iniciados. O JSON registra executável, versão do 7-Zip quando disponível (`VersaoExtrator`), argumentos exatos, diretório, PID, início/fim, código decimal/hexadecimal, erro e conclusão da captura. Se o DUP não criar seu log, os registros do processo continuam disponíveis. A saída extensa de ajuda fica no arquivo, sem inundar o console.
+
+O contador soma **bytes de conteúdo recebidos**, incluindo downloads parciais e arquivos cuja validação ou extração posterior falhou. Pacotes reutilizados do cache contam zero bytes de download. Ele não mede cabeçalhos ou todo o tráfego da conexão.
+
+As extrações exclusivas são limpas após a leitura, com conferência do caminho. Seus logs ficam em uma pasta local separada no cache (`extracao_<id>.logs`), preservada também em caso de falha, e são copiados para o diagnóstico da execução. Assim, o DUP pode registrar localmente mesmo quando a saída dos relatórios é UNC. Apenas nomes conhecidos e arquivos de até 20 MiB são copiados; se a cópia falhar ou ultrapassar esse limite, a auditoria informa o caminho local preservado. A limpeza do payload não apaga esses logs. Estruturas recusadas ou arquivos presos podem permanecer para inspeção. Não publique o cache no Git. O inventário e os dados CIM permanecem locais; a Dell recebe solicitações dos arquivos públicos e os dados normais da conexão.
 
 ## 2. Como funciona a engine
 
@@ -90,10 +177,14 @@ flowchart TD
     J --> E{Inventario informado?}
     K --> E
     E -->|Sim| F[Ler e validar arquivo existente]
-    E -->|Nao| G[Consultar ajuda e executar DSU --inventory]
-    F --> H[Aplicar regras locais de associacao e comparar versoes]
-    G --> H
-    H --> I[Gerar CSV principal, CSV de verificacao e log]
+    E -->|Nao| G[Consultar ajuda e coletar XML com DSU --inventory]
+    F --> L[Ler drivers PCI locais por CIM]
+    G --> L
+    L --> H[Aplicar regras locais de associacao e comparar versoes]
+    H --> M{Analise automatica de pacotes?}
+    M -->|Sim| N[Validar DUPs extrair XML e INF e recalcular]
+    M -->|Nao| I[Gerar CSV principal, CSV de verificacao e log]
+    N --> I
 ```
 
 ### Identificação e coleta
@@ -104,7 +195,9 @@ flowchart TD
 | Service Tag | `Win32_BIOS.SerialNumber`, por CIM local |
 | Modelo | `Win32_ComputerSystem.Model`, por CIM local |
 | Windows Server instalado | `Win32_OperatingSystem.Caption` e `ProductType` |
-| Componentes e versões instaladas | Texto de `DSU.exe --inventory`, ou arquivo importado |
+| Componentes e versões instaladas | XML de `DSU.exe --inventory --output-inventory-xml=...`, se anunciado na ajuda; texto em versões sem essa opção; ou arquivo importado |
+| Modelo físico, baia e identificadores de hardware | Atributos de `Device` no XML DSU, associados a cada `Application`; ausentes quando não fornecidos pelo coletor/texto |
+| Versão efetiva dos drivers PCI | CIM local `Win32_PnPSignedDriver`; a associação exige metadados Dell, sem consulta a patches do Windows |
 | Versões publicadas, criticidade, data e pacote | Interface interna de Drivers & Downloads no site Dell, consultada por HTTP ou lida da resposta salva no HAR |
 
 **A consulta padrão ao site usa modelo + sistema operacional**, identificados localmente. O script chama `packdriversbyproduct` e compara os downloads recebidos com o inventário atual. A Service Tag, lida de `Win32_BIOS.SerialNumber`, é incluída no relatório e no log, mas não é enviada nessa consulta.
@@ -119,7 +212,9 @@ No modo automático experimental por tag, o fluxo exige confirmação `IsTag = t
 
 Na importação manual com `-ConsultaSite ServiceTag`, a identidade exigida é a **Service Tag em texto claro na resposta, igual à lida do BIOS**. Apenas um identificador opaco na URL ou na resposta não comprova essa correspondência. Se a captura não trouxer essa identidade ou os dados marcados para tag, a importação estrita falha; é possível escolher explicitamente `-ConsultaSite Modelo` para usar a referência ampla, sem alegar validação por tag.
 
-Sem arquivo importado, o script localiza o DSU, executa `--help`, confere a opção `--inventory` e coleta o inventário. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. A Dell documenta o [inventário do DSU e a exportação de informações][inventario-dsu].
+Sem arquivo importado, o script localiza o DSU, executa `--help` e confere `--inventory`. Se a ajuda anunciar `--output-inventory-xml`, executa **as duas opções juntas** e lê o XML após o término com código zero. Se a ajuda não anunciar exportação XML, registra um aviso e usa o texto, com menor identificação de hardware. Quando o XML foi solicitado, ausência, truncamento ou erro da coleta interrompem o relatório: não há fallback textual para esconder a falha. Não usa `--preview` no modo Site. O DSU mantém suas próprias comunicações e pode baixar o coletor de inventário. Consulte o [inventário][inventario-dsu] e a [exportação XML][xml-dsu] documentados pela Dell.
+
+No XML, `Application.display`, `version` e `componentType` informam nome, versão e tipo. `Device.display` pode conter o modelo físico que faltava no texto. São preservados `componentID`, `FQDD`, os quatro PCI IDs, endereço bus/device/function e `enum`, quando presentes. Discos e interfaces iguais continuam sendo instâncias separadas. IDs coletados não são, por si só, prova de correspondência com um pacote do site.
 
 ### Associação dos componentes
 
@@ -131,9 +226,66 @@ O tipo informado pelo DSU separa `BIOS`, `FRMW` e `DRVR`. Aplicativos `APAC`, `A
 | iDRAC | Reconhece o nome do controlador no inventário e procura firmware cujo título comece com `iDRAC`. |
 | PERC | Extrai o modelo de um nome que comece com `PERC` ou `Dell PERC` e exige esse modelo como um token completo no título do firmware. `H730` não equivale a `H730P`. |
 | CPLD | Para `System CPLD`, procura firmware com `CPLD` no título. |
-| NICs, discos, fontes e demais drivers/firmwares | Ficam inconclusivos quando não há regra específica para associar dispositivo e versão. |
+| Discos com regra XML | Exige firmware, FQDD de disco em baia, modelo e ComponentID específicos. Confere também DriverId e modelo no título do pacote. Aceita somente os pares de versões explicitados abaixo. |
+| Firmware Broadcom BCM5720 | Compara FFV com DFF48 somente nos dois perfis PCI completos documentados abaixo. A versão do bootcode não é usada como FFV. |
+| Drivers PCI | Engine comum guiada por metadados de pacote, hardware, SO e espaço de versão. A base incorporada é 49X84/NDIS, com 33 perfis PCI e Windows Server 2016/2019; XML/INF interpretáveis podem acrescentar referências automaticamente. Classes aceitas: NET, SCSIAdapter, HDC, System, Display, Media e USB, somente com dispositivo PCI comprovado. |
+| Demais firmwares | A fase automática tenta associar ComponentID/PCI, modelo, SO e versão do manifesto. Comparação numérica exige pacote de um único ComponentID; os limites estão na seção de análise automática. Sem evidência suficiente, mantém inconclusivo. |
 
-Essas associações usam **tipo e textos de identificação/família**. O script não cruza PCI IDs ou Component IDs, não executa a verificação de compatibilidade do DUP e não comprova todas as pré-condições de instalação. Uma pendência identificada aqui deve ser validada na página do pacote antes de uma eventual atualização. A Dell distingue os métodos de descoberta automática dos downloads manuais por componente em seu [guia de atualização PowerEdge][metodos-dell].
+BIOS/iDRAC/PERC/CPLD usam **tipo e textos de identificação/família**; discos usam também ComponentID e FQDD; Broadcom usa os quatro PCI IDs do XML. O script não executa a verificação de compatibilidade do DUP e não comprova todas as pré-condições de instalação. Uma pendência identificada aqui deve ser validada na página do pacote antes de uma eventual atualização. A Dell distingue descoberta automática e downloads manuais em seu [guia de atualização PowerEdge][metodos-dell].
+
+#### Drivers PCI: associação por metadados, independente do modelo
+
+A engine de drivers separa **dados do pacote** de **lógica de comparação**. `Get-DellDriverDefinitions` contém os dados de referência incorporados ao `.ps1`; não é preciso copiar um arquivo auxiliar para o servidor. Cada entrada informa ComponentID/nome do inventário, famílias e tuplas PCI completas, Windows atendido, DriverId, arquivo/tipo do DUP e a versão efetiva do driver, distinguindo-a da versão de família/suíte.
+
+O fluxo é:
+
+1. Coleta os drivers de dispositivos PCI pelo CIM, independentemente do fabricante ou provedor instalado. As referências incorporadas iniciais são de rede; os INFs automáticos podem acrescentar outras classes PCI reconhecidas.
+2. Seleciona somente pacotes presentes na referência Dell consultada/importada, conferindo DriverId, versão de família, nome/tipo do arquivo, SO e data. Referências conflitantes na mesma data ficam inconclusivas.
+3. Confere VendorID, DeviceID, SubVendorID e SubDeviceID. O ID da instância PNP deve ser coerente com esses quatro campos, conforme os [identificadores PCI documentados pela Microsoft][pci-identificadores].
+4. Exige versão comparável, assinatura informada pelo CIM e IDs de instância únicos. Quando o XML lista as interfaces, exige cobertura por perfil e quantidade; não há quantidade fixa de placas ou portas.
+5. Compara cada grupo de versão instalada separadamente. Um servidor com versões distintas pode ter uma linha pendente e outra atualizada para a mesma família, com quantidade, provedor, INF e instâncias rastreáveis no CSV de verificação.
+
+**O provedor instalado é informativo.** Um driver assinado com provedor `Microsoft` pode ser comparado com um pacote Dell se o hardware, SO e versões estiverem associados. Não há exceção para `17.2.1.0`, `netb57va.inf`, hostname, Service Tag ou R530 na engine. Se o DSU não trouxer um registro DRVR de família, o CIM pode complementar o inventário quando houver hardware reconhecido e pacote Dell correspondente na referência. Isso não adiciona patches do Windows ao escopo.
+
+**A base incorporada não é universal:** começa com o pacote 49X84 e é complementada pela análise automática de XML/INF descrita acima. O driver cobre **33 perfis PCI**, derivados da interseção entre `SupportedDevices/PCIInfo` do `package.xml` e as famílias `14E4:1657`/`14E4:165F` declaradas no `nxUDUPconfig.xml`. A lista ampla do DUP contém outros dispositivos; eles não foram incluídos apenas por aparecerem nela. A [evidência da generalização](docs/evidencias/drivers-genericos-2026-10-29.json) registra essa seleção e as fontes.
+
+Para pacotes com XML/INF reconhecidos, essa entrada é derivada automaticamente, com a proveniência registrada no diagnóstico. Quando o formato não é reconhecido, ampliar o leitor ou incorporar uma referência exige validar hardware, SO e versão efetiva, registrar a fonte e acrescentar regressões. A lógica não deve ganhar condições por modelo de servidor ou provedor. Um pacote sem essa evidência continua inconclusivo. As regras anteriores de firmware e discos mantêm sua cobertura documentada.
+
+#### Broadcom: referências de firmware e driver da amostra
+
+Foram baixados os pacotes oficiais [DFF48][broadcom-fw] e [49X84][broadcom-driver] e extraídos estaticamente com 7-Zip, sem executar os instaladores, scripts ou payloads. Os SHA256 coincidiram com os publicados pela Dell e a verificação Authenticode local retornou `Valid`, assinante Dell Inc. A proveniência, hashes e limites estão em [evidência Broadcom de 29/10/2026](docs/evidencias/broadcom-2026-10-29.json). **7-Zip é opcional no servidor**: a nova fase automática prefere a instalação existente, mas pode usar a extração nativa do DUP. As referências incorporadas continuam disponíveis.
+
+Os `package.xml` de ambos os DUPs incluem os perfis abaixo; a coluna `family` do `bcmnxfw.cfg` confirma a FFV `22.00.6` para ambos:
+
+| VendorID | DeviceID | SubVendorID | SubDeviceID | Uso na amostra |
+| --- | --- | --- | --- | --- |
+| `14E4` | `165F` | `14E4` | `2003` | Duas interfaces |
+| `14E4` | `165F` | `1028` | `0639` | Quatro interfaces |
+
+Firmware usa somente o pacote DFF48 presente na referência selecionada, versão FFV `22.00.6`, comparada numericamente com a FFV do DSU, como `20.06.18`. A [referência antiga 1T8HX][broadcom-fw-antigo] também publica `20.6.18`, sustentando a identificação dessa família de versões. Versão interna como bootcode `1.39`, outro perfil PCI ou um novo alvo de pacote ficam inconclusivos até validação da regra.
+
+**Limite importante no Windows Server 2016:** a página e as notas do DFF48 listam Windows 2019/2022, sem 2016. O R530 e os dispositivos aparecem como atendidos, e a captura WST14 contém o pacote, mas isso não confirma a execução do instalador no Windows 2016. O relatório registra a diferença de firmware e acrescenta essa ressalva no `Motivo`. Antes de instalar, valide com a Dell o método fora do SO e os pré-requisitos. As instruções Dell oferecem atualização pelo Lifecycle Controller; nenhum desses métodos é executado pelo script.
+
+Para o **driver**, o coletor `nxUDUPconfig.xml` do 49X84 usa o ComponentID `8641`, consulta `HKLM\SOFTWARE\Dell\MUP\Broadcom\UInstaller\Product_Version` e tem `0.0.0` como valor padrão sem versão. Isso explica como um zero pode aparecer, mas não comprova qual condição ocorreu no Registro do servidor. O script não executa esse VBS nem depende dessa chave para decidir o estado do driver.
+
+A consulta [Win32_PnPSignedDriver][cim-driver] obtém versão, provedor, assinatura, INF e PCI IDs. As validações são as da engine genérica acima; versões distintas geram grupos separados e provedor Microsoft não é rejeitado por nome. Dados ausentes, divergentes ou sem assinatura preservam o inconclusivo. A consulta tem timeout de operação de 30 segundos; sua falha não é tratada como driver atualizado. A indicação de assinatura vem do CIM e não substitui uma verificação própria dos arquivos instalados.
+
+As [notas oficiais do 49X84][broadcom-driver-notas] distinguem a família `21.80.3` do driver **NDIS `214.0.0.6`**. `VersaoAtual`/`VersaoNova` usam NDIS nessa linha; a versão zero original permanece em `VersaoDSU`. O nome do pacote continua contendo sua versão de família. O mapeamento validado é restrito a Windows Server 2016/2019. A coleta real recebida confirmou seis drivers `17.2.1.0`, provedor Microsoft, assinados segundo o CIM; o reprocessamento com a nova engine está registrado abaixo.
+
+Firmware e driver são comparados separadamente. Isso **não certifica que DFF48 e 49X84 formem uma combinação recomendada**: as notas Dell condicionam o uso a versões compatíveis. A instalação exige conferir a combinação no procedimento de manutenção.
+
+O `Chipset INF` continua sendo um driver de hardware em escopo, mesmo com atualização do Windows delegada ao Endpoint Central. A [página Dell 99GP4][chipset-inf] informa que esse pacote aplica identificação aos dispositivos e pode não alterar a versão quando essa identificação já existe. Portanto, versão zero não é convertida automaticamente em pendência do chipset nem comparada com a versão de um driver genérico do Windows.
+
+#### Discos: regras restritas, sem ordenação alfabética
+
+| Identidade exigida no XML | Pacote presente na referência consultada | Pares aceitos pela regra local |
+| --- | --- | --- |
+| `MG04SCA20ENY`, ComponentID `105266`, FQDD `Disk.Bay...` | [Toshiba RG9MK / EG03][toshiba-eg03], título contendo o modelo | `EG02 → EG03`: pendente; `EG03 = EG03`: atualizado na referência |
+| `ST8000NM023B-2TJ` ou `ST8000NM023B-2TJ133`, ComponentID `111175`, FQDD `Disk.Bay...` | [Seagate P183W / LA0C][seagate-la0c], título contendo `ST8000NM023B` | `LA0B → LA0C`: pendente; `LA0C = LA0C`: atualizado na referência |
+
+A página Dell RG9MK identifica os modelos Toshiba e a versão EG03; a P183W identifica o modelo completo Seagate `ST8000NM023B-2TJ133` e a versão LA0C. O XML observado abrevia esse modelo para `ST8000NM023B-2TJ`; a regra aceita **essa abreviação exata junto com o ComponentID observado**, sem aceitar qualquer sufixo. Ambos os pacotes estão na captura R530/Windows Server 2016 analisada e têm DUP Windows.
+
+Essas regras são uma **inferência local documentada** entre a identidade/versão observada e a referência publicada, não uma autorização de atualização ou uma matriz de transições certificada pela Dell. As páginas não comprovam todas as condições do servidor, RAID ou disco. ComponentIDs vieram do XML observado, não de um contrato da API. Outro modelo, CID, pacote ou par de versões fica inconclusivo. Por exemplo, `EG04` instalado ou publicado não é ordenado contra `EG03`; exige ampliar a regra com evidência e teste. A referência continua vindo do HAR/site: pacote ausente na consulta não gera pendência.
 
 ### Escolha da referência e comparação
 
@@ -144,7 +296,7 @@ Para cada componente com regra de associação, o código:
 3. Se houver versões diferentes empatadas na data mais recente, ou se nenhuma data válida puder ser selecionada, registra inconclusivo.
 4. Usa a parte de `DellVer` **antes da primeira vírgula** como versão de referência.
 5. Compara os segmentos numéricos. Por exemplo, `2.19.0` é superior a `2.5.4`; `2.19.0.0` equivale a `2.19.0`.
-6. Registra versões zero, alfanuméricas ou não comparáveis como inconclusivas. Não sugere downgrade quando a instalada é superior à referência.
+6. Registra versões zero ou não comparáveis como inconclusivas. Firmware alfanumérico só é comparado nos pares explícitos das regras de disco acima. Não sugere downgrade quando a comparação numérica indica instalada superior.
 
 A criticidade vem do texto **`Imp`** e é normalizada para `Urgente`, `Recomendado` ou `Opcional`. Não depende do código numérico `ImpId`. O SO participa do filtro enviado à API; o código atual não revalida localmente a lista `AppOses` de cada pacote.
 
@@ -221,7 +373,7 @@ Os [termos de uso do site no Brasil][termos-site-br] apresentam uma permissão g
 | Aspecto | Comportamento do script e limite |
 | --- | --- |
 | Conexão | Usa URL HTTPS da Dell, adiciona TLS 1.2 aos protocolos existentes e não desabilita a validação de certificados do Windows/.NET. `Invoke-WebRequest` pode seguir redirecionamentos. |
-| Conteúdo remoto | Processa metadados. O modo Site não baixa nem executa pacotes de firmware/drivers ou JavaScript remoto. |
+| Conteúdo remoto | Processa metadados. O modo Site padrão baixa DUPs candidatos, valida hash/assinatura e extrai. Pode iniciar o DUP apenas com `/s /e`, sem instalar. Não executa JavaScript da página ou instaladores do payload. `-AnalisePacotes Desativada` desliga essa fase. |
 | Dados enviados no modo Site | No padrão `Modelo`, são enviados modelo e SO; a tag não participa da requisição. Somente no modo experimental `ServiceTag`, a tag é enviada à página Dell e seu identificador é enviado à API, junto com modelo/SO. Não são enviados hostname ou inventário. A sessão HTTP pode receber cookies do site; não há login nem credenciais adicionadas pelo script. O serviço recebe também IP e headers. |
 | DSU local | Executa o binário encontrado ou informado pelo operador. O script não verifica sua assinatura Authenticode/hash e não audita as comunicações internas do DSU. |
 | Dados armazenados | CSV, log e diagnóstico podem conter hostname, Service Tag, seu identificador, URL de consulta, componentes e versões. A proteção depende das permissões da pasta/UNC; o script não cria ACLs. Os valores reais da tag/identificador não integram os fixtures nem as evidências versionáveis. |
@@ -251,7 +403,7 @@ Hostname;ServiceTag;Modelo;Componente;Categoria;VersaoAtual;VersaoNova;Criticida
 
 Contém as pendências identificadas, ordenadas por **Urgente → Recomendado → Opcional**. Se houver componentes inconclusivos, acrescenta uma linha de aviso de **verificação parcial**, inclusive quando nenhuma pendência tiver sido identificada.
 
-O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo` e `URL` às dez colunas. Ele é o arquivo adequado para revisar as associações:
+O **`_Verificacao.csv`**, gerado no modo Site, mantém a ordem do inventário e acrescenta `Status`, `Motivo`, `URL`, `FonteVersao`, `VersaoDSU`, `InfName`, `QuantidadeDispositivosDriver`, `ProvedorDriver`, `PnpDeviceIDs`, `TipoDSU`, `ModeloDispositivo`, `ComponentID`, `FQDD`, `VendorID`, `DeviceID`, `SubVendorID`, `SubDeviceID`, `Bus`, `Device`, `Function` e `Enumerador` às dez colunas. Identificadores ficam vazios quando não fornecidos pelo inventário. Ele permite revisar as associações e localizar a baia de cada disco:
 
 | Status | Interpretação dentro das regras atuais |
 | --- | --- |
@@ -284,10 +436,13 @@ No modo manual, o diagnóstico preserva os downloads normalizados utilizados e o
 | `-ConsultaSite` | `Modelo` (padrão): lista ampla para modelo + Windows instalado. `ServiceTag` exige dados por tag; com HAR, exige ainda a tag clara correspondente ao BIOS. A consulta HTTP por tag segue experimental e bloqueada nos testes online. Só se aplica a `-Fonte Site`. |
 | `-CaminhoSaida` | Subpasta `Relatorios` junto do script; aceita pasta local ou UNC. |
 | `-CaminhoDSU` | Descoberta de `dsu.exe` no PATH e em pastas Dell conhecidas. Permite caminho completo explícito. |
-| `-ArquivoInventario` | Reutiliza um texto do DSU do mesmo servidor. Somente com `-Fonte Site`. |
+| `-ArquivoInventario` | Reutiliza XML `SVMInventory` ou texto do DSU do mesmo servidor. Prefira XML para obter identificação física. Somente com `-Fonte Site`. |
 | `-ArquivoSiteDell` | Caminho local ou UNC de um HAR sanitizado exportado do Edge/Chrome, com a resposta de downloads. Substitui a consulta HTTP; somente com `-Fonte Site`. Incompatível com `-Catalogo` e `-Fonte Catalogo`. |
 | `-CodigoProduto` | Derivado do modelo. Permite informar um código conferido na URL Dell, como `poweredge-r530`. |
 | `-CodigoSO` | Derivado do Windows instalado. Permite informar um código conferido no site. |
+| `-AnalisePacotes` | `Automatica` (padrão em Site) ou `Desativada`. Controla downloads/extração de DUPs; não altera a coleta DSU. |
+| `-CaminhoCachePacotes` | `%ProgramData%\RelatorioDell\CachePacotes`; pasta local curta, sem UNC/reparse point. |
+| `-LimitePacotes` | 30 por execução, de 1 a 500. Limites de tamanho e tempo continuam aplicáveis. |
 | `-Catalogo` | URL HTTPS ou arquivo XML/GZip local/UNC. Informá-lo sem `-Fonte` seleciona o modo `Catalogo`. |
 | `-TempoLimiteDSUMinutos` | 10 minutos por chamada de inventário/preview; aceita de 1 a 180. A ajuda tem limite de 1 minuto. |
 
@@ -297,7 +452,7 @@ Falhas como falta de administrador, DSU ausente, rede/API inacessível, HTTP 403
 
 O script usa `packdriversbyproduct` por padrão. Se a opção experimental por tag for escolhida e falhar, não há troca automática para modelo. O tipo de consulta aparece no log e em `fonte-site.txt`.
 
-Com `-ArquivoSiteDell`, nenhuma chamada HTTP é feita para obter os downloads. Arquivo inválido, truncado, sem corpo, com produto/SO errado ou com contexto ambíguo gera erro. O importador não executa scripts da página, não segue URLs do HAR e não baixa os pacotes listados. O significado de cada campo e a captura correta estão no [guia da importação manual](docs/Importacao-Manual-Dell.md).
+Com `-ArquivoSiteDell`, a lista é lida localmente, mas a fase de análise automática pode baixar DUPs oficiais. Arquivo inválido, truncado, sem corpo, com produto/SO errado ou com contexto ambíguo gera erro. O importador não executa scripts da página. A fase posterior pode usar somente URLs oficiais de arquivos, com hash e assinatura validados. O significado de cada campo e a captura correta estão no [guia da importação manual](docs/Importacao-Manual-Dell.md).
 
 ### HTTP 403 na consulta por Service Tag
 
@@ -323,9 +478,21 @@ Para ajustar uma diferença de formato entre versões, revise os arquivos brutos
 | `Get-DellSiteReference` / `Import-DellSiteHar` | Seleção entre consulta online e leitura local de HAR; validação de modelo, SO, respostas e metadados de captura. |
 | `Get-DellHarRequestContext` / `ConvertTo-DellHarReference` | Identificação das requisições Dell e preservação apenas dos campos usados na comparação. |
 | `ConvertFrom-DsuInventoryText` / `Get-ValidatedInventory` | Leitura de `N. [TIPO, ]Componente ( Version : versão )` e conferência das linhas. |
+| `Import-DsuInventory` / `ConvertFrom-DsuInventoryXml` | Importação XML/texto, BOM UTF-16/UTF-8, schema, instâncias e identificadores. |
+| `Get-SiteInventoryArguments` / `Get-DsuSiteInventory` | Verificação da ajuda e coleta automática XML; erro se o arquivo solicitado estiver ausente/inválido. |
+| `Get-DellDiskRule` / `Compare-DellDiskVersion` | Identidade/pacote e pares alfanuméricos explícitos, sem ordenação genérica. |
+| `Get-BroadcomPciProfile` | Tuplas PCI completas verificadas nos metadados Dell. |
+| `Get-DellWindowsNetworkDrivers` / `Get-PciDeviceKey` | Coleta de drivers PCI e normalização de identidade; sem Windows Update. |
+| `Get-DellDriverDefinitions` / `Get-DellDriverReference` | Dados incorporados de pacotes e seleção por identidade, arquivo, versão e SO; sem regras por modelo. |
+| `Get-DellInstalledDriverGroups` / `New-DellDriverAssessmentRows` | Confere assinatura/instâncias e compara grupos de versões; provedor é informativo. |
 | `New-SiteAssessmentRows` | Regras locais de associação. É o ponto para ampliar cobertura com evidência e testes. |
 | `Compare-DottedVersion` | Comparação de segmentos numéricos. |
 | `Export-SiteAssessment` | CSV principal, aviso de cobertura parcial e CSV de verificação. |
+| `Get-DellAutomaticMetadata` / `Get-DellCachedPackageMetadata` | Candidatos, cache, limites, download, autenticidade e auditoria por pacote. |
+| `Get-DellPackagePriority` | Ordenação por componentes inconclusivos e data; não decide aplicabilidade. |
+| `Get-DellExtractionPlan` / `Invoke-DellExtractionProcess` | Linha de extração, captura simultânea dos pipes, timeout e diagnóstico preservado do processo. |
+| `Get-DellAutomaticPackageMetadata` / `ConvertFrom-DellInf` | Leitura de XML/INF e referências derivadas, sem condição por fabricante/modelo. |
+| `Merge-DellAutomaticFirmwareRows` | Associa referências de firmware e conserva inconclusivos quando não há comparação comprovada. |
 
 ## 6. Modo alternativo: catálogo e preview
 
@@ -364,7 +531,11 @@ tests/
   fixtures/
     README.md                       # origem e transformação das amostras
     Inventario-R530.txt              # amostra de inventário sem identificadores do servidor
+    Inventario-R530.xml              # identidades físicas e versões, sem identidade de cliente
     dell-r530-resumo.json            # seis registros reais, reduzidos para os testes
+    dell-r530-discos.json            # dois pacotes de disco da captura de 29/10/2026
+    dell-r530-broadcom-driver.json   # pacote 49X84; evidências CIM dos testes são sintéticas
+    drivers-windows-net-exemplo.json # dados reais de versão/provedor, identidades anonimizadas
 ```
 
 As pastas `backup_antes_API_...` e `Exemplos` eram cópias de segurança/relatórios gerados na preparação e foram retiradas da árvore do projeto. Não são dependências. `tests` é mantida para permitir que outros analistas reproduzam a validação. Os relatórios reais gerados em operação não devem integrar os arquivos fonte do projeto.
@@ -375,7 +546,7 @@ Execute a suíte offline:
 powershell.exe -NoProfile -File .\tests\Test-RelatorioDell.ps1
 ```
 
-São **80 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Um teste inicia um processo filho de `powershell.exe` para verificar captura de stdout/stderr. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
+São **162 testes** em Windows PowerShell 5.1. Carregam as funções pelo AST e não executam a rotina principal, CIM, DSU ou acesso à rede. Alguns testes iniciam processos filhos de `powershell.exe`, com comandos sintéticos, para verificar captura de stdout/stderr, timeout e persistência de falhas. Não executam DUPs no CI. A suíte cobre parsing, associação, versões, respostas inesperadas, cobertura parcial, CSV com BOM e regras do catálogo. A consulta padrão por modelo é verificada sem acesso à página por tag. Os casos experimentais por tag simulam HTTP e verificam seleção `IsTagDriver > 0`, identidade, marcações inválidas, bloqueio HTTP e ausência de fallback por modelo. Os testes de erro distinguem uma resposta 403 de falhas sem resposta HTTP e verificam que a recusa não gera resultado de sucesso.
 
 Os 20 casos de importação manual usam HARs sintéticos e cobrem leitura sem HTTP, corpo em base64/rotação, arquivo grande, produto/SO incorretos, ambiguidades, identidade da tag, metadados e privacidade. Uma regressão confirma as mesmas duas pendências e 16 registros inconclusivos da referência reduzida. A execução real descrita abaixo complementa os testes offline, sem garantir cobertura de outros modelos ou configurações.
 
@@ -408,9 +579,66 @@ Uma captura anterior, também válida, continha 352 downloads para **Windows Ser
 
 Esse teste comprova o fluxo **HAR manual + inventário local + comparação por modelo/SO** nesse servidor. Não comprova filtragem pela Service Tag nem ausência de pendências nos 16 componentes inconclusivos. HAR, hostname, tag e relatórios operacionais não integram o repositório.
 
+### Reprocessamento com inventário XML em 29/10/2026
+
+O XML fornecido pelo operador contém 25 aplicações de dispositivos, `schemaVersion="1.0"` e coletor `26.09.000 (BLD_22)`. Essa versão é do **Inventory Collector**, não comprova a versão do executável DSU. O arquivo identifica os quatro discos físicos atrás da PERC, seus modelos, ComponentIDs e baias; também traz os PCI IDs das seis interfaces Broadcom. Não foi necessário consultar o iDRAC para obter essas informações.
+
+Na primeira implementação XML, antes das regras Broadcom, o reprocessamento com os 323 downloads do HAR R530/Windows Server 2016 produziu:
+
+| Resultado em escopo | Texto anterior | XML com as regras de disco |
+| --- | --- | --- |
+| Pendências identificadas | 2 | 5 |
+| Atualizados na referência | 1 | 2 |
+| Inconclusivos | 16 | 12 |
+| Total em escopo | 19 | 19 |
+
+As três pendências adicionais são **baia 0 Toshiba EG02 → EG03** e **baias 2 e 3 Seagate LA0B → LA0C**. A baia 1 Toshiba já informa EG03. Os 12 inconclusivos restantes são seis firmwares de interfaces Broadcom, duas fontes, dois drivers com versão zero, SEP e CPLD. Os IDs agora ficam disponíveis no CSV de verificação, mas não bastam para atribuir uma versão de pacote a esses dispositivos sem regras adicionais.
+
+Esse resultado valida o **reprocessamento local dos arquivos recebidos**, não uma nova coleta DSU no servidor nem teste de compatibilidade dos DUPs. As 18 regressões adicionais cobrem XML UTF-16, importação textual, instâncias, DTD, arquivos incompletos/grandes, ajuda/coleta simuladas, identidades divergentes, versões desconhecidas e CSVs. Os originais operacionais em `.tmp/`, os HARs e `InventarioDell*.xml` na raiz ficam ignorados pelo Git. Só amostras revisadas, sem identidade de cliente e com proveniência documentada entram em `tests/fixtures`.
+
+O modo Site salva `inventory.normalizado.json` com as instâncias e IDs disponíveis. A coleta automática XML fica em `inventory.xml`; a importação guarda `inventory.importado.xml` ou `.txt` no diagnóstico. O snapshot XML importado é convertido para UTF-8 com declaração coerente, sem alterar o original UTF-16. Esses diagnósticos continuam sendo dados operacionais do cliente.
+
+### Reprocessamento anterior, com a primeira regra Broadcom
+
+Com os mesmos XML/HAR reais, sem inventar dados CIM do servidor, a revisão posterior produziu **11 pendências identificadas, 2 atualizados na referência e 6 inconclusivos**, mantendo 19 itens em escopo. As seis novas pendências são os firmwares das interfaces Broadcom `20.06.18 → 22.00.6`; referem-se a seis interfaces, não necessariamente seis placas físicas. O pacote aparece uma vez por interface inventariada.
+
+Nesse estágio, permaneciam inconclusivos duas fontes, driver Broadcom, Chipset INF, SEP e CPLD. A primeira regra exigia provedor Broadcom; o teste posterior revelou provedor Microsoft, versão `17.2.1.0`, nas seis interfaces. Essa restrição foi substituída pela engine por metadados descrita acima. O diagnóstico `drivers-windows.json` preserva a coleta real para revisão.
+
+O teste confirma identificação e comparação com a referência, sem validar execução do DUP em Windows 2016 ou a combinação entre firmware e driver. As nove regressões Broadcom cobrem identidade PCI completa, FFV, mapeamento NDIS, dados CIM ausentes/parciais/divergentes, assinatura/provedor, versões desconhecidas e escopo de coleta sem Windows Update.
+
+### Validação da engine genérica no ambiente de teste
+
+O reprocessamento local do XML, dos 323 downloads e dos **dados CIM reais recebidos** resultou em **12 pendências, 2 atualizados na referência e 5 inconclusivos**, mantendo 19 registros em escopo. O driver de família passou a pendente: `17.2.1.0 → 214.0.0.6`, seis dispositivos, provedor Microsoft. Essa é uma inferência de versão/applicabilidade pelos metadados, sem execução do DUP ou nova atualização do servidor.
+
+Permanecem inconclusivos as duas fontes, Chipset INF, SEP e CPLD. Não foram descartados para reduzir a contagem. Com versões de driver diferentes, o número de linhas pode crescer, pois cada grupo passa a ter seu próprio resultado. Drivers CIM reconhecidos também podem complementar registros de família ausentes no DSU.
+
+As regressões adicionais exercitam provedor Microsoft, quantidades variáveis, outros nomes de modelo, outro fabricante/pacote **sintéticos**, perfil PCI adicional do pacote real, ausência do registro DRVR, versões distintas, identidade PNP divergente, referência ambígua e rastreabilidade no CSV. Esses testes demonstram independência da lógica em relação ao modelo; não equivalem a execuções físicas em R350/R740/R750 ou validação de todos os fabricantes. Os testes e a revisão dos arquivos ocorrem neste ambiente de teste, sem instalar atualizações.
+
+### Validação da obtenção automática de metadados
+
+A suíte offline tem **162 casos**. Os cenários automáticos usam manifesto XML e INF **sintéticos** em `tests/fixtures/pacote-auto` e simulam download, assinatura e extração para não executar binários de fornecedor no CI. Cobrem URL/assinatura/hash recusados, cache adulterado, limpeza/lock, limites e falhas de rede, seleção INF por arquitetura/build, overrides, correspondência PCI, versões e referências de firmware. O caso positivo deriva uma referência de outro fabricante e a compara com CIM sintético, sem cadastrar uma regra por pacote.
+
+Uma validação separada neste ambiente usou cinco DUPs reais obtidos pelos links/hashes do HAR: **49X84, DFF48, 99GP4, K5DP6 e H81H3**. SHA256 e assinatura Dell foram conferidos. O fluxo extraiu e interpretou os manifestos dos três primeiros por 7-Zip. Os dois últimos não expuseram o manifesto nessa via; a tentativa de `/s /e` foi recusada pelo Windows por exigir elevação na sessão do agente. A execução nativa como administrador permanece para validação no servidor de teste; não foi declarada como concluída aqui.
+
+Os drivers 49X84/99GP4 não expuseram INF utilizável na extração: o payload contém instaladores internos. Foram registrados como extração parcial, sem inventar versão de driver a partir da suíte. A referência incorporada 49X84 continua válida no seu escopo. Essa validação comprova a leitura dos manifestos desses arquivos, não eliminação dos cinco inconclusivos nem suporte a todos os formatos de DUP. Consulte [a evidência da validação automática](docs/evidencias/pacotes-automaticos-2026-10-29.json).
+
+### Correções após o teste de 30/10/2026
+
+O teste no servidor concluiu o inventário, mas não obteve metadados automáticos: houve falhas de extração e três recusas HTTP 403. Os arquivos recebidos não continham os logs internos das extrações. A implementação anterior colocava o log dentro do destino, citava as opções inteiras com aspas, descartava os logs junto do payload e somava downloads somente após o sucesso da análise. Esses problemas foram corrigidos; não foi afirmado que explicam todos os códigos de falha observados.
+
+As regressões verificam a linha `/s /e="pasta" /l="log externo"`, destino vazio, fallback sem misturar manifestos, saída de ajuda maior que o buffer do pipe, falha ao iniciar, timeout, logs preservados, bytes após falhas de download/extração e prioridade de inconclusivos. A ordenação foi reaplicada aos dados recebidos, sem executar pacotes: candidatos de fontes e chipset passam ao início da fila. Isso não comprova que cada candidato atenda ao hardware instalado.
+
+Também foi repetida a leitura do 49X84 real no cache: SHA256/assinatura validados, manifesto extraído por 7-Zip e arquivos de diagnóstico preservados, sem iniciar o DUP nativo. Continuou sem INF exposto, como na validação anterior. **A chamada nativa corrigida ainda precisa de uma nova execução como administrador no servidor de teste.**
+
+Para repetir, substitua o `.ps1` e use o mesmo comando. O cache existente pode ser reutilizado. Ao enviar o resultado, inclua a pasta de diagnóstico inteira, especialmente `pacotes-analise.csv` e a subpasta `pacotes`; não é necessário copiar os executáveis do cache.
+
+O teste seguinte conseguiu ler **10 manifestos** entre 30 pacotes examinados: seis firmwares e quatro drivers. Os drivers não expuseram uma referência INF utilizável. As outras 20 extrações nativas encerraram com `0xC0000409` (18) ou `0xC0000417` (2), com log interno vazio; a causa desses encerramentos não foi comprovada. O resultado permaneceu em 12 pendências, dois atualizados e cinco inconclusivos.
+
+Os novos logs também revelaram um erro anterior à análise do conteúdo: **todas as 30 chamadas do 7-Zip retornaram código 7 e `Incorrect command line`**. Isso não comprova que os pacotes sejam incompatíveis com o 7-Zip. A chamada foi simplificada conforme o passo 4, retirando as opções `-bs*` e deixando as aspas nos caminhos. O aviso agora distingue erro de comando, falha do extrator e ausência de manifesto; a versão instalada passa a integrar o diagnóstico. Não se presume uma versão específica do 7-Zip no servidor a partir desses arquivos. A linha nova foi validada localmente com 7-Zip 26.05 e o DUP 49X84 real, com código zero e leitura do manifesto. A execução seguinte no servidor confirmou a chamada com **7-Zip 9.20**: as 30 chamadas retornaram código zero e 28 manifestos foram interpretados. Os dois pacotes K5DP6/H81H3 continuaram sem manifesto exposto e falharam na alternativa nativa. A análise derivou a referência do driver T244W pelo XML/INF e a associou ao hardware PCI local, aumentando de 12 para **13 pendências**, com cinco inconclusivos. Essa execução valida o cenário testado, não todas as versões do 7-Zip ou todos os formatos de DUP.
+
 ## 8. Testes no GitHub e fluxo de branches
 
-O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 80 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
+O workflow [Testes PowerShell](.github/workflows/testes.yml) roda em cada push, em pull requests para `main` e `master` e por acionamento manual na aba **Actions**. Executa os 162 testes offline com **Windows PowerShell 5.1**, em runners `windows-2022` e `windows-2025`, e verifica o BOM dos scripts. Não executa DSU nem consulta equipamentos ou o site Dell.
 
 O fluxo de trabalho é:
 
@@ -425,10 +653,12 @@ A configuração segue a [sintaxe oficial de workflows](https://docs.github.com/
 
 ## Referências Dell
 
-Consultadas em **28/10/2026**. Diferencie a documentação pública dos produtos, os recursos do próprio site usados como evidência empírica e os termos gerais, que não foram confirmados como contrato específico do endpoint interno.
+Consultadas em **28 e 29/10/2026**. Diferencie a documentação pública dos produtos, os recursos do próprio site usados como evidência empírica e os termos gerais, que não foram confirmados como contrato específico do endpoint interno.
 
 - [Dell System Update — apresentação e documentação][dsu].
 - [DSU — inventário e exportação][inventario-dsu].
+- [DSU 1.9.2.0 — manual, exportação XML][xml-dsu].
+- Pacotes de disco: [Toshiba EG03 / RG9MK][toshiba-eg03] e [Seagate LA0C / P183W][seagate-la0c], conferidos em 29/10/2026. Sustentam modelo e versão publicados; não certificam as regras locais de associação nem os pré-requisitos de cada servidor.
 - [PowerEdge — métodos de atualização e downloads gratuitos][metodos-dell].
 - [PowerEdge — tipos e cobertura dos catálogos][catalogos].
 - [DSU — preview][preview-dsu] e [códigos de retorno][retornos-dsu].
@@ -437,6 +667,16 @@ Consultadas em **28/10/2026**. Diferencie a documentação pública dos produtos
 - [Termos de uso do site no Brasil][termos-site-br], [termos gerais de APIs][termos-api] e [privacidade na América Latina][privacidade].
 
 [dsu]: https://www.dell.com/support/kbdoc/en-us/000130590/dell-emc-system-update-dsu
+[xml-dsu]: https://dl.dell.com/topicspdf/system-update_users-guide2_en-us.pdf
+[toshiba-eg03]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=rg9mk
+[seagate-la0c]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=p183w
+[broadcom-fw]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=dff48
+[broadcom-fw-antigo]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=1t8hx
+[broadcom-driver]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=49x84
+[broadcom-driver-notas]: https://downloads.dell.com/FOLDER07078680M/1/Release_user_NX1_v218.0.169.2.txt
+[chipset-inf]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=99gp4
+[cim-driver]: https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/aa394354(v=vs.85)
+[pci-identificadores]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/identifiers-for-pci-devices
 [inventario-dsu]: https://www.dell.com/support/manuals/en-us/system-update/dsu_2.1.0.0_ug/inventory?guid=guid-d1f74624-9edd-4218-998d-d85c90f1c5cc&lang=en-us
 [metodos-dell]: https://www.dell.com/support/kbdoc/en-us/000128194/updating-firmware-and-drivers-on-dell-emc-poweredge-servers
 [catalogos]: https://www.dell.com/support/kbdoc/en-us/000132986/dell-emc-catalog-links-for-poweredge-servers
@@ -452,3 +692,8 @@ Consultadas em **28/10/2026**. Diferencie a documentação pública dos produtos
 [bios-r530]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=pvdnh
 [perc-h730p]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=700gg
 [idrac8]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=vwf72
+
+[dup-cli]: https://www.dell.com/support/manuals/en-ca/dell-update-packages-v17.10.00/dup_17.10_users_guide/windows-cli-options?guid=guid-7e40f460-fdff-4cf9-b26f-e58065d8acbe&lang=en-us
+[inf-driverver]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-driverver-directive
+[inf-manufacturer]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-manufacturer-section
+[inf-models]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-models-section
