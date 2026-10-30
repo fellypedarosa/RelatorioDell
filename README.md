@@ -1,38 +1,51 @@
-# Relatório local de firmware e drivers Dell PowerEdge
+# Relatório de atualizações Dell PowerEdge
 
-Script PowerShell para apoiar a análise de atualizações em servidores Dell PowerEdge com Windows Server. Compara versões instaladas com uma referência Dell e gera CSV, log e arquivos de diagnóstico. **Não instala atualizações nem reinicia o servidor.**
+Script para executar no próprio Windows Server e gerar um relatório de **BIOS, firmwares e drivers Dell pendentes**. **Não instala atualizações nem reinicia o servidor.** Atualizações do Windows ficam fora do escopo.
 
-**Escopo:** BIOS, firmwares e drivers de hardware disponibilizados no suporte Dell. Isso inclui componentes de fabricantes como Broadcom e Intel; o driver não precisa ter autoria da Dell para fazer parte do hardware do PowerEdge. Patches do Windows, atualizações cumulativas e aplicativos ficam com o **Endpoint Central**. O script não consulta Windows Update. O CIM lê dados locais de drivers de dispositivos PCI; somente uma referência Dell validada permite classificá-las como pendentes.
+## Como funciona
 
-## Resumo: como ele pesquisa em cada servidor
+1. Identifica o servidor e coleta o hardware e as versões instaladas com o DSU e o Windows.
+2. Obtém a lista de downloads Dell pelo **modelo e Windows instalado**, ou usa um arquivo HAR que você exportou do site.
+3. Compara as informações. Quando necessário, baixa pacotes candidatos, valida e extrai seus metadados para confirmar a correspondência com o hardware.
+4. Gera CSV com as pendências identificadas e sinaliza os componentes que continuam inconclusivos.
 
-Você executa o mesmo script em cada servidor. **Ele identifica automaticamente a Service Tag, o modelo e o Windows Server instalado**, normalmente sem precisar preencher ou editar essas informações.
+## Como usar
 
-1. Identifica a Service Tag, o modelo e o Windows Server da própria máquina.
-2. Consulta os downloads Dell pelo **modelo e sistema operacional instalado**, ou lê um HAR salvo manualmente do navegador com `-ArquivoSiteDell`. A Service Tag identifica o servidor no relatório, mas não é enviada na consulta automática padrão.
-3. Coleta ou carrega o inventário do DSU e lê os drivers PCI locais pelo CIM.
-4. Por padrão, baixa e valida pacotes Dell candidatos, extrai seus metadados e tenta descobrir automaticamente a correspondência entre hardware e versão. Mantém as referências incorporadas quando não há uma substituição automática comprovada.
-5. Compara as versões e gera o relatório de pendências identificadas, sinalizando os casos inconclusivos.
+**Você precisa de:** Windows PowerShell 5.1, sessão de administrador, DSU instalado para uma coleta nova e acesso à Dell para consultas/downloads. O 7-Zip é opcional; sem ele, o script tenta a extração nativa dos pacotes.
 
-O modelo é identificado automaticamente e validado na resposta. Exemplos:
+Copie `Gerar-RelatorioDell.ps1` para uma pasta do servidor. Abra o PowerShell **como administrador**, entre nessa pasta e escolha uma das opções:
 
-| Servidor identificado | Código consultado |
+**Consulta automática por modelo + Windows:**
+
+```powershell
+.\Gerar-RelatorioDell.ps1
+```
+
+**Usando a lista salva do site Dell:** coloque também o HAR na pasta e execute:
+
+```powershell
+.\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har'
+```
+
+O HAR deve corresponder ao modelo e Windows desse servidor. Veja [como exportar o HAR](docs/Importacao-Manual-Dell.md). No modo padrão, a Service Tag identifica o servidor no relatório; a consulta não é filtrada automaticamente por ela.
+
+A pasta **`Relatorios` é criada automaticamente ao lado do script**. A primeira execução pode demorar mais por causa do inventário e dos downloads; os pacotes em cache são reutilizados e validados nas próximas execuções.
+
+## Como ler o resultado
+
+| Arquivo | Para que serve |
 | --- | --- |
-| PowerEdge R530 | `poweredge-r530` |
-| PowerEdge R740 | `poweredge-r740` |
-| PowerEdge R750 | `poweredge-r750` |
+| `DSU_SERVIDOR_DATA_ID.csv` | Pendências identificadas, ordenadas por criticidade. Pode incluir um aviso de verificação parcial. |
+| `DSU_SERVIDOR_DATA_ID_Verificacao.csv` | Resultado por componente, com versões, status, motivo e link do pacote quando associado. |
+| `.log` e pasta `_diagnostico` | Etapas da execução e detalhes para investigar falhas ou inconclusivos. |
 
-**O padrão voltou a ser modelo + sistema operacional (`-ConsultaSite Modelo`).** Execute o script sem parâmetros para usar esse fluxo. A consulta por tag permanece somente como opção experimental explícita (`-ConsultaSite ServiceTag`); ela não é executada no modo padrão.
+**Inconclusivo significa que faltou evidência para confirmar a situação daquele componente.** Ele pode estar atualizado ou precisar de atualização. Não conte esses itens como atualizados; confira o motivo no CSV de verificação e siga a [orientação para revisão manual](#como-verificar-e-atualizar-manualmente-um-inconclusivo).
 
-**Alternativa manual, sem complemento de navegador:** abra o site Dell pela Service Tag, selecione o Windows correto e exporte um arquivo **HAR sanitizado** pela guia Rede do Edge ou Chrome. O parâmetro `-ArquivoSiteDell` usa esse arquivo no lugar da consulta HTTP do script. Não é necessário copiar cada atualização ou baixar seus pacotes. Consulte o [passo a passo de importação manual](docs/Importacao-Manual-Dell.md).
+Por padrão, a análise automática examina até **30 pacotes candidatos**. Mesmo um resultado sem pendências continua limitado ao inventário, à referência consultada e à cobertura do script.
 
-**Situação da validação: consulta por tag experimental e sem sucesso online confirmado.** O fluxo foi testado com HTTP simulado, mas a tentativa online retornou HTTP 403 neste ambiente e uma execução posterior no servidor também foi recusada. Não há uma correção de acesso validada. O teste anterior bem-sucedido de 352 registros foi por modelo, não por tag. Consulte os detalhes e evidências da seção 3.
+Para outra pasta de saída, uso de UNC ou reaproveitamento de inventário, consulte a [execução detalhada](#1-executar-no-servidor). A documentação completa do funcionamento, das fontes Dell, das limitações e dos testes está abaixo.
 
-Os detalhes técnicos, as regras de comparação e suas limitações estão nas seções seguintes. A [pesquisa de alternativas para consulta por Service Tag](docs/Pesquisa-ServiceTag.md) avalia coleta no navegador, APIs, ferramentas Dell e uma proposta de validação, sem presumir que o bloqueio HTTP tenha sido resolvido.
-
-**Alcance atual:** as referências incorporadas identificam BIOS, iDRAC, firmware PERC e CPLD quando há referência inequívoca, além dos discos e perfis Broadcom documentados adiante. A análise automática pode acrescentar outros drivers PCI e firmwares a partir dos metadados dos próprios pacotes, sem uma regra por modelo de servidor. Componentes sem identidade ou versão comprovadas continuam **inconclusivos**. O relatório não certifica que todo o servidor esteja atualizado.
-
-Este é um script próprio. As fontes de downloads e os comandos do DSU são da Dell; as regras de associação e comparação deste projeto não são uma engine de aplicabilidade fornecida ou certificada pela Dell.
+---
 
 ## 1. Executar no servidor
 
@@ -202,6 +215,38 @@ flowchart TD
     M -->|Nao| I[Gerar CSV principal, CSV de verificacao e log]
     N --> I
 ```
+
+### Consulta, escopo e cobertura
+
+**Escopo:** BIOS, firmwares e drivers de hardware disponibilizados no suporte Dell. Isso inclui componentes de fabricantes como Broadcom e Intel; o driver não precisa ter autoria da Dell para fazer parte do hardware do PowerEdge. Patches do Windows, atualizações cumulativas e aplicativos ficam com o **Endpoint Central**. O script não consulta Windows Update. O CIM lê dados locais de drivers de dispositivos PCI; somente uma referência Dell validada permite classificá-las como pendentes.
+
+Você executa o mesmo script em cada servidor. **Ele identifica automaticamente a Service Tag, o modelo e o Windows Server instalado**, normalmente sem precisar preencher ou editar essas informações.
+
+1. Identifica a Service Tag, o modelo e o Windows Server da própria máquina.
+2. Consulta os downloads Dell pelo **modelo e sistema operacional instalado**, ou lê um HAR salvo manualmente do navegador com `-ArquivoSiteDell`. A Service Tag identifica o servidor no relatório, mas não é enviada na consulta automática padrão.
+3. Coleta ou carrega o inventário do DSU e lê os drivers PCI locais pelo CIM.
+4. Por padrão, baixa e valida pacotes Dell candidatos, extrai seus metadados e tenta descobrir automaticamente a correspondência entre hardware e versão. Mantém as referências incorporadas quando não há uma substituição automática comprovada.
+5. Compara as versões e gera o relatório de pendências identificadas, sinalizando os casos inconclusivos.
+
+O modelo é identificado automaticamente e validado na resposta. Exemplos:
+
+| Servidor identificado | Código consultado |
+| --- | --- |
+| PowerEdge R530 | `poweredge-r530` |
+| PowerEdge R740 | `poweredge-r740` |
+| PowerEdge R750 | `poweredge-r750` |
+
+**O padrão voltou a ser modelo + sistema operacional (`-ConsultaSite Modelo`).** Execute o script sem parâmetros para usar esse fluxo. A consulta por tag permanece somente como opção experimental explícita (`-ConsultaSite ServiceTag`); ela não é executada no modo padrão.
+
+**Alternativa manual, sem complemento de navegador:** abra o site Dell pela Service Tag, selecione o Windows correto e exporte um arquivo **HAR sanitizado** pela guia Rede do Edge ou Chrome. O parâmetro `-ArquivoSiteDell` usa esse arquivo no lugar da consulta HTTP do script. Não é necessário copiar cada atualização ou baixar seus pacotes. Consulte o [passo a passo de importação manual](docs/Importacao-Manual-Dell.md).
+
+**Situação da validação: consulta por tag experimental e sem sucesso online confirmado.** O fluxo foi testado com HTTP simulado, mas a tentativa online retornou HTTP 403 neste ambiente e uma execução posterior no servidor também foi recusada. Não há uma correção de acesso validada. O teste anterior bem-sucedido de 352 registros foi por modelo, não por tag. Consulte os detalhes e evidências da seção 3.
+
+Os detalhes técnicos, as regras de comparação e suas limitações estão nas seções seguintes. A [pesquisa de alternativas para consulta por Service Tag](docs/Pesquisa-ServiceTag.md) avalia coleta no navegador, APIs, ferramentas Dell e uma proposta de validação, sem presumir que o bloqueio HTTP tenha sido resolvido.
+
+**Alcance atual:** as referências incorporadas identificam BIOS, iDRAC, firmware PERC e CPLD quando há referência inequívoca, além dos discos e perfis Broadcom documentados adiante. A análise automática pode acrescentar outros drivers PCI e firmwares a partir dos metadados dos próprios pacotes, sem uma regra por modelo de servidor. Componentes sem identidade ou versão comprovadas continuam **inconclusivos**. O relatório não certifica que todo o servidor esteja atualizado.
+
+Este é um script próprio. As fontes de downloads e os comandos do DSU são da Dell; as regras de associação e comparação deste projeto não são uma engine de aplicabilidade fornecida ou certificada pela Dell.
 
 ### Identificação e coleta
 
