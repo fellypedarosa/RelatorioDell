@@ -436,6 +436,43 @@ Um componente pode aparecer com outro nome, fazer parte de um pacote que atende 
 
 Consulte a coluna **`Motivo`** do `_Verificacao.csv` para saber a razão de cada caso. Essa classificação exige revisão; não deve ser contada como componente atualizado nem como atualização pendente confirmada.
 
+#### Por que um pacote identificado ainda pode ser inconclusivo?
+
+**Encontrar um pacote candidato, confirmar o hardware e confirmar a necessidade de atualização são verificações diferentes.** O script pode preencher `VersaoNova`, `NomeDoPacote`, `URL` e `Criticidade` e ainda não ter evidência suficiente para marcar `Pendente`.
+
+| Situação | O que falta comprovar |
+| --- | --- |
+| Nenhum pacote associado | A lista consultada ou a cobertura do leitor pode não incluir uma referência utilizável. Isso não comprova que o componente esteja atualizado. |
+| Hardware ou escopo ambíguos | Nome semelhante, mesmo modelo de servidor ou pacote com vários dispositivos não comprovam a correspondência da variante instalada. |
+| Versão instalada ausente, zero ou coleta CIM interrompida | Falta uma versão instalada confiável. O script não a substitui pela versão oferecida no download. |
+| Versão da suíte diferente da versão do driver | É preciso comparar versões equivalentes; a família informada pelo DSU pode ser diferente do `DriverVer` usado pelo Windows. |
+| Firmware alfanumérico ou pacote com múltiplos ComponentIDs | A comparação genérica atual não presume a ordem dessas versões nem aplica a versão do pacote indistintamente a todos os componentes. |
+| Windows/arquitetura não confirmados ou referências conflitantes | Falta comprovar suporte ou escolher uma referência inequívoca. |
+| Extração, download ou leitura incompletos | Hash/assinatura recusados, HTTP, INF encapsulado, formato desconhecido e limites da etapa podem impedir a análise; os motivos ficam no diagnóstico. |
+
+**A criticidade pertence ao pacote candidato.** Se a Dell classificar o pacote como `Urgente`, esse valor pode aparecer em uma linha inconclusiva. Isso não transforma a linha em pendência confirmada nem confirma que o servidor deva instalar o pacote. Sem pacote ou classificação associados, a criticidade pode ficar vazia.
+
+**A origem da versão instalada também importa.** `VersaoDSU` preserva o valor original do inventário; `VersaoAtual` é o valor usado na comparação e pode vir do CIM, conforme `FonteVersao`. Para drivers reconhecidos, o CIM informa a versão instalada no Windows, e o INF/referência validada informa a versão disponível. Para BIOS/firmwares inventariados, normalmente a versão instalada vem do DSU. Por exemplo, suíte `20.2.0` e driver `17.4.0.0` não representam necessariamente a mesma escala de versão.
+
+#### Exemplo real: discos FJ23 e pacote FJ46
+
+No teste, os dois discos tinham modelo **HUC101812CSS204**, ComponentID **103498** e firmware instalado **FJ23**. O script associou o candidato **DYYN1/FJ46** pelos metadados; a [página oficial do pacote][hgst-fj46] também lista esse modelo e o PowerEdge R530.
+
+Mesmo assim, os discos permanecem inconclusivos: `FJ23` e `FJ46` são versões alfanuméricas, e o pacote declara vários ComponentIDs. A comparação automática genérica não considera suficiente remover o prefixo e comparar `23` com `46`. Variantes e revisões podem ter versões com aparência semelhante; a correspondência do modelo, sozinha, também não comprova o caminho de atualização nem os pré-requisitos do dispositivo instalado.
+
+**Mantém-se essa limitação para evitar falsos positivos.** Não foi criada uma ordenação alfanumérica genérica nem uma regra nova para FJ23 → FJ46. As regras restritas de outros discos, documentadas anteriormente, permanecem com seus pares explícitos. Neste caso há um candidato a verificar manualmente, não uma atualização descartada ou uma incompatibilidade comprovada.
+
+#### Como verificar e atualizar manualmente um inconclusivo
+
+1. **Leia a linha no `_Verificacao.csv`.** Confira `Motivo`, `FonteVersao`, versões, `ModeloDispositivo`, ComponentID, FQDD/baia e `URL`. Separe um problema de coleta/extração de uma limitação da regra de comparação.
+2. **Confirme o componente físico instalado.** Para discos atrás de RAID e outros firmwares, consulte o inventário do iDRAC: modelo exato, baia, número de peça e versão, quando disponíveis. Para drivers Windows, confira o dispositivo e a versão efetiva pelo CIM/Gerenciador de Dispositivos. Não compare a versão de uma suíte com a do driver individual.
+3. **Valide a página Dell do pacote candidato.** Confira os dispositivos e sistemas atendidos, Windows quando a execução for pelo SO, notas de versão, pré-requisitos, eventual versão intermediária e instruções de instalação. A página aberta pela Service Tag e a classificação `Urgente` não substituem essa validação. Sem `URL` associada, pesquise pelo modelo exato/número da peça do componente, além da identificação do servidor.
+4. **Para firmware com atualização pelo iDRAC suportada, examine antes de instalar.** No iDRAC 7/8, a Dell documenta `Overview → iDRAC Settings → Update and Rollback`: selecione o arquivo e faça `Upload`. Depois confira os dispositivos reconhecidos e as versões `Current`/`Available`. O upload e a instalação são etapas separadas. Reconhecer o arquivo não comprova, sozinho, todos os pré-requisitos ou que o caminho desde a versão instalada seja adequado. Veja o [procedimento oficial Dell][atualizacao-idrac].
+5. **Instale somente depois de confirmar a correspondência e os pré-requisitos.** Use o método indicado para aquele pacote (iDRAC/Lifecycle Controller ou instalador Dell no Windows), em janela de manutenção, com backup verificado e considerando eventuais reinicializações. Drivers Windows devem seguir suas instruções de instalação, não o fluxo de firmware do iDRAC. Os [métodos oficiais de atualização PowerEdge][metodos-dell] descrevem as alternativas. Se ainda faltar comprovação, mantenha a classificação inconclusiva e consulte a documentação/suporte Dell.
+6. **Confira o resultado após a manutenção.** Faça uma coleta nova do inventário e dos drivers, em vez de reutilizar o XML antigo. Se o script continuar sem suporte à comparação daquele formato, ele pode manter inconclusivo mesmo depois da atualização; registre a verificação manual e a versão confirmada.
+
+Esse procedimento orienta uma revisão humana. **O script continua apenas gerando relatórios; ele não instala os pacotes.**
+
 No modo Site, a linha **“Nenhuma atualização pendente”** exige ausência de pendências e de registros inconclusivos no inventário em escopo. Ela continua limitada ao que foi inventariado e à referência consultada; não é uma certificação de atualização completa do servidor.
 
 No modo automático, o diagnóstico guarda `downloads-site-resposta.json` (resposta completa decodificada), `downloads-site.json` (registros efetivamente usados; filtrados por tag somente no modo experimental `ServiceTag`), `fonte-site.txt`, os textos de ajuda/inventário concluídos ou o arquivo importado. A fonte registra o tipo de consulta e as quantidades recebida/usada; o log registra horários, etapas e contagens. As saídas brutas de um processo só são gravadas depois do encerramento do processo e da captura dos pipes; podem não existir em uma falha por timeout.
@@ -721,3 +758,6 @@ Consultadas em **28 e 29/10/2026**. Diferencie a documentação pública dos pro
 [inf-driverver]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-driverver-directive
 [inf-manufacturer]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-manufacturer-section
 [inf-models]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-models-section
+
+[hgst-fj46]: https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=dyyn1
+[atualizacao-idrac]: https://www.dell.com/support/kbdoc/en-us/000134013/dell-poweredge-update-the-firmware-of-single-system-components-remotely-using-the-idrac
