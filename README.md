@@ -96,6 +96,22 @@ Não entregue print, PDF, HTML salvo ou o resultado de **Download Selected**. O 
 
 **Ativa por padrão em `-Fonte Site` (`-AnalisePacotes Automatica`).** Você continua fornecendo o HAR e executando o mesmo script. Ele usa os links e hashes SHA256 dos arquivos presentes nessa resposta para obter metadados que não estão na tabela de downloads. Não é necessário cadastrar uma regra por fabricante para cada pacote cujo formato seja reconhecido.
 
+#### Em linguagem simples: como escolhe e baixa os pacotes
+
+**Inconclusivo é um componente instalado cuja situação ainda não pôde ser confirmada.** Não significa necessariamente que o modelo do servidor não foi encontrado no site Dell.
+
+1. **De onde vêm os candidatos?** Da lista de downloads Dell para o modelo e Windows do servidor. Ela é obtida pela consulta online ou lida do HAR que você entrega. Essa lista já contém nomes, tipos, versões, datas, links dos arquivos e hashes SHA256; o script não inventa endereços de download.
+2. **Como escolhe o que investigar?** Separa BIOS, firmwares e drivers com pacote Windows. Prioriza os candidatos que parecem relacionados aos componentes inconclusivos, usando modelo físico, termos do nome e famílias como fonte/PSU, chipset e controladora. Considera correspondência, data e tamanho. Por padrão, examina até **30 pacotes** por execução.
+3. **Como baixa?** Faz o download direto por HTTPS dos repositórios oficiais `downloads.dell.com`/`dl.dell.com`, sem abrir o navegador. Se o arquivo já estiver no cache, reutiliza-o. Antes de extrair, confere novamente SHA256 e assinatura digital Dell.
+4. **Como confirma que o pacote corresponde ao componente?** Extrai os metadados e cruza os identificadores de hardware e o Windows atendido com o inventário local. Para drivers com INF utilizável, obtém a versão real do driver e a compara com a informada pelo CIM. Para firmware, aplica os critérios de identidade e comparação descritos abaixo.
+5. **Qual é o resultado?** Com evidência suficiente, classifica como pendente, atualizado na referência ou acima da referência. Se faltar informação, houver ambiguidade ou a extração falhar, mantém inconclusivo.
+
+**Escolher um candidato para baixar é uma pista para investigação, não uma confirmação de que ele serve.** Baixar e extrair também não garante resolver um inconclusivo. O script não instala as atualizações.
+
+Exemplo validado no servidor de teste: o pacote **T244W** expôs XML e INF compatíveis com a identidade PCI da PERC H730P Mini. O CIM informou o driver instalado **6.603.6.0**, e o INF do pacote informou **6.604.06.00**. A análise automática identificou essa pendência sem cadastrar uma regra específica para T244W; o resultado passou de 12 para 13 pendências, mantendo cinco inconclusivos.
+
+Os parâmetros e os detalhes técnicos dessa investigação estão a seguir.
+
 ```powershell
 .\Gerar-RelatorioDell.ps1 -ArquivoSiteDell '.\DownloadsDell.har' -ArquivoInventario '.\InventarioDell.xml'
 
@@ -618,7 +634,7 @@ Para repetir, substitua o `.ps1` e use o mesmo comando. O cache existente pode s
 
 O teste seguinte conseguiu ler **10 manifestos** entre 30 pacotes examinados: seis firmwares e quatro drivers. Os drivers não expuseram uma referência INF utilizável. As outras 20 extrações nativas encerraram com `0xC0000409` (18) ou `0xC0000417` (2), com log interno vazio; a causa desses encerramentos não foi comprovada. O resultado permaneceu em 12 pendências, dois atualizados e cinco inconclusivos.
 
-Os novos logs também revelaram um erro anterior à análise do conteúdo: **todas as 30 chamadas do 7-Zip retornaram código 7 e `Incorrect command line`**. Isso não comprova que os pacotes sejam incompatíveis com o 7-Zip. A chamada foi simplificada conforme o passo 4, retirando as opções `-bs*` e deixando as aspas nos caminhos. O aviso agora distingue erro de comando, falha do extrator e ausência de manifesto; a versão instalada passa a integrar o diagnóstico. Não se presume uma versão específica do 7-Zip no servidor a partir desses arquivos. A linha nova foi validada localmente com 7-Zip 26.05 e o DUP 49X84 real, com código zero e leitura do manifesto. A validação dessa chamada no servidor ainda depende do próximo teste.
+Os novos logs também revelaram um erro anterior à análise do conteúdo: **todas as 30 chamadas do 7-Zip retornaram código 7 e `Incorrect command line`**. Isso não comprova que os pacotes sejam incompatíveis com o 7-Zip. A chamada foi simplificada conforme o passo 4, retirando as opções `-bs*` e deixando as aspas nos caminhos. O aviso agora distingue erro de comando, falha do extrator e ausência de manifesto; a versão instalada passa a integrar o diagnóstico. Não se presume uma versão específica do 7-Zip no servidor a partir desses arquivos. A linha nova foi validada localmente com 7-Zip 26.05 e o DUP 49X84 real, com código zero e leitura do manifesto. A execução seguinte no servidor confirmou a chamada com **7-Zip 9.20**: as 30 chamadas retornaram código zero e 28 manifestos foram interpretados. Os dois pacotes K5DP6/H81H3 continuaram sem manifesto exposto e falharam na alternativa nativa. A análise derivou a referência do driver T244W pelo XML/INF e a associou ao hardware PCI local, aumentando de 12 para **13 pendências**, com cinco inconclusivos. Essa execução valida o cenário testado, não todas as versões do 7-Zip ou todos os formatos de DUP.
 
 ## 8. Testes no GitHub e fluxo de branches
 
